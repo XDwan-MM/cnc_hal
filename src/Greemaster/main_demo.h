@@ -33,7 +33,7 @@ typedef struct {
 /* 设备字典路径。**开发期默认值**指向源码树那份，部署时必须 -D 覆盖。
  * 加载失败不致命——设备全判 UNKNOWN_TYPE，装配落空。 */
 #ifndef DEVICES_JSON_PATH
-#define DEVICES_JSON_PATH "/home/mxh/CNC/HAL/src/Greemaster/devices.json"
+#define DEVICES_JSON_PATH "/home/gree/mxh/cnc_hal-master/cnc_hal/src/Greemaster/devices.json"
 #endif
 
 /* =============== 开发期开关，上机前保持默认 =============== */
