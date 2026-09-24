@@ -90,7 +90,7 @@ typedef struct {
 typedef struct {
     HalCAxisCfg axis;                   /* 通用属性全在这，不重复 */
     double      max_speed;              /* rpm */
-    double      accel;
+    double      accel;                  /* 预留的主轴加速度参数；当前仅校验 >= 0，不生成加减速曲线，单位未定 */
     double      speed_window;           /* 转速到位窗口（rpm）；HAL 据此给 at_speed */
 } HalCSpindleCfg;
 

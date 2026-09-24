@@ -18,7 +18,7 @@ typedef struct {
     int speed_pdo_units_confirmed;  /* 已核对驱动速度 PDO 的单位与 HAL 的 counts/s 假设一致。 */
     double rpm;                     /* 获批的低速试转目标，单位 rpm，必须小于配置的 max_speed。 */
     double speed_tolerance;         /* 转速到位及停转判定的允许误差，单位 rpm。 */
-    double angle_target;            /* CSP 用例的累计绝对目标角度，单位 deg。 */
+    double angle_target;            /* CSP 用例先把静止当前位置标为 0°，再下发此测试坐标系中的目标角度，单位 deg。 */
     double max_angle_step;          /* 本次允许的最大角位移，单位 deg；不是速度限制。 */
     double angle_tolerance;         /* 角度到位允许误差，单位 deg。 */
 } HalSpindleHardwareCase;
@@ -30,9 +30,9 @@ typedef struct {
     HalSpindleHardwareCase spindle; /* 从站 2、逻辑轴 0 的主轴试验参数。 */
     uint32_t x_len;
     uint32_t y_len;
-    uint8_t y_safe[HAL_TEST_IMAGE_MAX];
-    uint8_t y_test[HAL_TEST_IMAGE_MAX];
-    int io_images_confirmed;
+    uint8_t y_safe[HAL_TEST_IMAGE_MAX]; /* 整块 Y 的已审核安全输出值；零值不一定安全。 */
+    uint8_t y_test[HAL_TEST_IMAGE_MAX]; /* 整块 Y 的测试输出值；应从 y_safe 复制后只修改批准位。 */
+    int io_images_confirmed;          /* 人工确认两幅完整映像及改动位；程序只检查此标志，不自动验证位映射。 */
 } HalHardwareTestSettings;
 
 /* 返回 0 表示所有现场配置已填写并审核；非 0 时程序拒绝启动主站。 */

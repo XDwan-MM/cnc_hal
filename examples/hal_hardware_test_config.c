@@ -90,14 +90,15 @@ int hal_hardware_test_config(HalCConfig* config, HalHardwareTestSettings* settin
      * settings->spindle.speed_pdo_units_confirmed = 1; // 速度 PDO 确认为 counts/s
      * settings->spindle.rpm = ...;              // 批准的低速正/反转目标
      * settings->spindle.speed_tolerance = ...;  // rpm
-     * settings->spindle.angle_target = ...;     // deg，绝对累计角度
+     * settings->spindle.angle_target = ...;     // deg，本用例把静止当前位置设为 0° 后的目标
      * settings->spindle.max_angle_step = ...;   // deg
      * settings->spindle.angle_tolerance = ...;  // deg
      *
      * settings->x_len = ...; // 覆盖全部 X 映像的字节数
      * settings->y_len = ...; // 覆盖全部 Y 映像的字节数，<= 4096
-     * settings->y_safe[字节地址] = ...; // 整块 Y 的已审核安全映像
-     * settings->y_test[字节地址] = ...; // 只含批准输出点的测试映像
+     * settings->y_safe[字节地址] = ...; // 整块 Y 的已审核安全输出值
+     * memcpy(settings->y_test, settings->y_safe, settings->y_len);
+     * settings->y_test[已批准字节] |= (1u << 已批准位); // 仅修改获批输出点
      * settings->io_images_confirmed = 1; // 两幅完整 Y 映像已经逐位核对
      *
      * 主轴虽然也是伺服，仍必须在 spindles[] 中配置才能测试 CSV/CSP。

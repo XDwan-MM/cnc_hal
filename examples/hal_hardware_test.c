@@ -69,8 +69,12 @@ static int static_cases(const HalCConfig* config) {
 #define NEGATIVE(field, value, wanted) do {                              \
     bad = *config; bad.field = value;                                     \
     int32_t rc = hal_config_validate(&bad, err, sizeof(err));             \
-    printf("STATIC %-35s rc=%d err=%s\n", #field, rc, err);              \
-    if (rc != wanted) return -1;                                          \
+    if (rc != wanted) {                                                    \
+        fprintf(stderr, "FAIL %-35s expected=%d actual=%d err=%s\n",      \
+                #field, wanted, rc, err);                                  \
+        return -1;                                                         \
+    }                                                                      \
+    printf("EXPECTED_REJECT %-27s rc=%d err=%s\n", #field, rc, err);      \
 } while (0)
     NEGATIVE(abi_minor, (uint16_t)(HAL_C_ABI_MINOR + 1), HAL_ERROR_ABI);
     NEGATIVE(struct_size, 0, HAL_ERROR_ABI);
@@ -483,11 +487,31 @@ static int spindle_angle_case(Runner* r) {
     if (!s->scaling_confirmed || !isfinite(s->angle_target) ||
         !isfinite(s->max_angle_step) || s->max_angle_step <= 0 ||
         !isfinite(s->angle_tolerance) || s->angle_tolerance < 0 ||
-        !r->settings->settle_cycles) return -1;
+        !r->settings->settle_cycles) {
+        fprintf(stderr, "spindle-angle 配置未就绪：scaling_confirmed=%d "
+                "angle_target=%.6f max_angle_step=%.6f angle_tolerance=%.6f "
+                "settle_cycles=%u\n",
+                s->scaling_confirmed, s->angle_target, s->max_angle_step,
+                s->angle_tolerance, r->settings->settle_cycles);
+        return -1;
+    }
     HalCSpindleStatus state;
     if (spindle_snapshot(r, &state)) return -1;
-    if (fabs(s->angle_target - state.position_deg) > s->max_angle_step) return -1;
-    if (prompt("确认主轴 CSP 角度目标、最大转角与实体停机手段")) return -1;
+    printf("SPINDLE raw startup position=%.6f deg; test target=%.6f deg; max_step=%.6f deg\n",
+           state.position_deg, s->angle_target, s->max_angle_step);
+    if (fabs(s->angle_target) > s->max_angle_step) {
+        fprintf(stderr, "角度目标相对测试零点超出 max_angle_step\n");
+        return -1;
+    }
+    if (prompt("确认主轴静止；将当前位置临时标为本次测试的 0 度，随后测试 CSP 小角度目标")) return -1;
+    if (call("hal_rt_axis_set_pos(spindle, 0 deg)",
+             hal_rt_axis_set_pos(r->ctx, 0, 0.0))) return -1;
+    if (spindle_snapshot(r, &state)) return -1;
+    printf("SPINDLE test zero position=%.6f deg\n", state.position_deg);
+    if (fabs(state.position_deg) > s->angle_tolerance) {
+        fprintf(stderr, "重新设坐标后仍未处于测试零点\n");
+        return -1;
+    }
     if (call("spindle mode CSP",
              hal_rt_spindle_request_mode(r->ctx, 0, HAL_SPINDLE_CSP)) ||
         call("spindle enable", hal_rt_spindle_enable(r->ctx, 0, 1))) return -1;
@@ -496,8 +520,16 @@ static int spindle_angle_case(Runner* r) {
         if (spindle_snapshot(r, &state)) goto failed;
         if (state.mode == HAL_SPINDLE_CSP && state.enabled) { ready = 1; break; }
     }
-    if (!ready ||
-        fabs(s->angle_target - state.position_deg) > s->max_angle_step) goto failed;
+    if (!ready) {
+        fprintf(stderr, "主轴未在规定周期内进入 CSP 使能状态\n");
+        goto failed;
+    }
+    if (fabs(s->angle_target - state.position_deg) > s->max_angle_step) {
+        fprintf(stderr, "使能后角度目标相对当前位置超出 max_angle_step: "
+                "current=%.6f target=%.6f limit=%.6f\n",
+                state.position_deg, s->angle_target, s->max_angle_step);
+        goto failed;
+    }
     if (prompt("主轴已在 CSP 使能且静止；输入 YES 下发目标角度")) goto failed;
     if (begin_tick(r)) goto failed;
     int rc = hal_rt_spindle_write_pos(r->ctx, 0, s->angle_target);
