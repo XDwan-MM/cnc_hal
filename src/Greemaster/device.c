@@ -3,6 +3,9 @@
 #include "common/devdict.h"
 
 static int position = 0;   /* 装配期的槽推进游标，仅本文件用 */
+static char g_bind_error[192];
+
+const char* device_bind_error(void) { return g_bind_error; }
 
 /* 一台从站在 g_device_data 里占几个槽。
  * 多轴驱动器一台占多个槽（axis6 → 6，axis4 → 4），所以"槽号"与"从站号"
@@ -40,70 +43,6 @@ DEVICE_TYPE get_device_types_from_info(const DEVICE_BASIC_INFO* device_info) {
         return UNKNOWN_TYPE;
     }
     return device_type_from_string(e.type);
-}
-
-/**
- * @brief 在指定的 PDO_RESULT 中，检查某个条目是否已存在于任何一个 PDO 中
- *
- * @param result_ptr 指向 PDO_RESULT 的指针
- * @param target 目标条目
- * @return int 1: 存在, 0: 不存在
- */
-static int is_entry_exists_in_result(PDO_RESULT* result_ptr, const TARGET_ENTRY* target) {
-    if (result_ptr == NULL || result_ptr->count == 0) {
-        return 0;
-    }
-
-    for (int i = 0; i < result_ptr->count; i++) {
-        VALID_PDO_INFO* current_pdo = &result_ptr->validPdos[i];
-        for (int j = 0; j < current_pdo->entryCount; j++) {
-            // 只要 Index 和 SubIndex 匹配，就认为条目存在
-            if (current_pdo->entries[j].index == target->index &&
-                current_pdo->entries[j].subIndex == target->subIndex) {
-                return 1;
-            }
-        }
-    }
-    return 0;
-}
-
-/**
- * @brief 如果条目不存在，则追加到最后一个 PDO
- *
- * @param result_ptr 指向 PDO_RESULT 的指针
- * @param target 目标条目
- * @return int 1: 成功追加, 0: 已存在或无法追加(无PDO或空间满), -1: 参数错误
- */
-static int ensure_entry_in_last_pdo(PDO_RESULT* result_ptr, const TARGET_ENTRY* target) {
-    if (result_ptr == NULL || result_ptr->count == 0) {
-        return 0; // 没有 PDO 可追加
-    }
-
-    // 1. 检查是否已存在
-    if (is_entry_exists_in_result(result_ptr, target)) {
-        return 0; // 已存在，无需操作
-    }
-
-    // 2. 获取最后一个 PDO
-    VALID_PDO_INFO* last_pdo = &result_ptr->validPdos[result_ptr->count - 1];
-
-    // 3. 检查空间
-    if (last_pdo->entryCount >= MAX_ENTRY_PER_PDO) {
-        printf("Warning: Last PDO 0x%04X is full. Cannot add entry %04X:%02X.\n",
-            last_pdo->headerInfo.pdoEntry, target->index, target->subIndex);
-        return 0;
-    }
-
-    // 4. 执行追加
-    int idx = last_pdo->entryCount;
-    last_pdo->entries[idx].index = target->index;
-    last_pdo->entries[idx].subIndex = target->subIndex;
-    last_pdo->entries[idx].bitLen = target->bitLen;
-
-    last_pdo->entryCount++;
-    last_pdo->headerInfo.entryCount = (unsigned char)last_pdo->entryCount;
-
-    return 1;
 }
 
 static int ParsePdosInBlock(const unsigned char* data, size_t bytes,
@@ -370,28 +309,8 @@ static int COERequestResult(const DEVICE_BASIC_INFO* info, const unsigned char* 
         const int freed = GM_Free_PDO_Map(fallback);
         if (rc != 0 || freed != 0) return -1;
     }
-    if (info->type == SERVO_TYPE) {
-        DevDictEntry dict;
-        if (!DevDict_Lookup(info->ID, info->CODE, info->Revision, &dict)) return -1;
-        /* 自定义对象号也用于动态补映射，不能写回标准对象号。 */
-        const DevDictRole roles[] = { DEV_DICT_ROLE_ACTUAL_SPEED, DEV_DICT_ROLE_ERROR_CODE,
-                                     DEV_DICT_ROLE_TARGET_SPEED, DEV_DICT_ROLE_OP_MODE };
-        const TARGET_ENTRY standard[] = {{0x606C,0,32}, {0x603F,0,16},
-                                          {0x60FF,0,32}, {0x6060,0,8}};
-        for (int i = 0; i < 4; ++i) {
-            TARGET_ENTRY target = standard[i];
-            if (strcmp(dict.profile, "custom") == 0) {
-                DevDictObject object;
-                if (!DevDict_FindObject(&dict, roles[i], &object)) return -1;
-                target.index = object.index;
-                target.subIndex = object.sub;
-                target.bitLen = object.bits;
-            }
-            PDO_RESULT* result = i < 2 ? &tx : &rx;
-            if (!is_entry_exists_in_result(result, &target) &&
-                ensure_entry_in_last_pdo(result, &target) != 1) return -1;
-        }
-    }
+    /* P1 只依据已有映射评估能力。未知设备限制时不能把可选对象试写到末尾 PDO；
+     * 有依据的映射生成留给 P3。 */
 
     const int tx_bits = calculate_tx_bit(&tx), rx_bits = calcute_rx_bit(&rx);
     Slave_info* slave = create_empty_slave(slave_pos);
@@ -537,9 +456,30 @@ int servo_addr_config(Slave_info* list, uint32_t slave_pos, uint32_t slot) {
     }
     for (int i = 0; i < count; ++i) {
         uint32_t pdo, entry;
-        if (find_object(slave, &objects[i], &pdo, &entry) != 0 ||
-            bind_servo_role(list, slave_pos, slot, &objects[i], pdo, entry, 0) != 0)
+        const DevDictRole role = objects[i].role;
+        const int required = role == DEV_DICT_ROLE_STATUS_WORD ||
+            role == DEV_DICT_ROLE_ACTUAL_POS || role == DEV_DICT_ROLE_MODE_DISPLAY ||
+            role == DEV_DICT_ROLE_CONTROL_WORD || role == DEV_DICT_ROLE_TARGET_POS ||
+            role == DEV_DICT_ROLE_OP_MODE;
+        if (find_object(slave, &objects[i], &pdo, &entry) != 0) {
+            if (required) {
+                snprintf(g_bind_error, sizeof(g_bind_error),
+                         "从站 %u 槽 %u 缺少必需 PDO 对象 0x%04X:%02X (%u bit)",
+                         slave_pos, slot, objects[i].index, objects[i].sub, objects[i].bits);
+                return -1;
+            }
+            continue;
+        }
+        if (bind_servo_role(list, slave_pos, slot, &objects[i], pdo, entry, 0) != 0)
             return -1;
+    }
+    const slave_addr* h = &g_device_data[slot].slave;
+    if (h->statusWord.bit_length != 16 || h->act_pos.bit_length != 32 ||
+        h->act_mode.bit_length != 8 || h->Control_word.bit_length != 16 ||
+        h->target_pos.bit_length != 32 || h->Modes_of_operation.bit_length != 8) {
+        snprintf(g_bind_error, sizeof(g_bind_error),
+                 "从站 %u 槽 %u 缺少必需 DS402 角色", slave_pos, slot);
+        return -1;
     }
     return 0;
 }
@@ -613,6 +553,7 @@ static int bind_io(Slave_info* list, uint32_t slave_pos, int slot, int panel) {
 }
 
 int device_match(Slave_info* list, DEVICE_TYPE* types, int slave_num) {
+    g_bind_error[0] = '\0';
     if (slave_num < 0 || slave_num > MAX_DEVICE_NUM || (slave_num && !types)) return -1;
     int total = 0;
     for (int i = 0; i < slave_num; ++i) {

@@ -12,6 +12,7 @@
 #define HAL_ERROR_STATE       0x0001
 #define HAL_ERROR_MEMORY      0x000C
 #define HAL_ERROR_TIMEOUT     0x0104
+#define HAL_ERROR_UNSUPPORTED 0x0105
 
 #ifdef __cplusplus
 extern "C" {

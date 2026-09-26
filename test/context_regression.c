@@ -14,6 +14,7 @@ static uint32_t inputs[4][64], output[4][64], servo[2][DEV_DICT_ROLE_COUNT];
 static int opened, starts, closes, sends, reads, writes, steps, waits;
 static int fail_init, fail_read, fail_write, fail_step, fail_wait, fail_send, fail_calloc;
 static int wrong_type, bad_width;
+static int omit_optional, omit_spindle_speed;
 static pthread_barrier_t entered, resume_wait;
 static int block_wait;
 static MasterConfig received_config;
@@ -37,6 +38,20 @@ int ethercat_init(const MasterConfig* cfg) {
         slots[i].vendor_id = 123; slots[i].product_code = 456;
         slots[i].serial = 99;
         strcpy(slots[i].name, "Dual axis");
+        slots[i].entries.slave.statusWord.bit_length = 16;
+        slots[i].entries.slave.act_pos.bit_length = 32;
+        slots[i].entries.slave.act_mode.bit_length = 8;
+        slots[i].entries.slave.Control_word.bit_length = 16;
+        slots[i].entries.slave.target_pos.bit_length = 32;
+        slots[i].entries.slave.Modes_of_operation.bit_length = 8;
+        slots[i].entries.slave.act_speed.bit_length = 32;
+        slots[i].entries.slave.target_speed.bit_length = 32;
+        slots[i].entries.slave.error_code.bit_length = 16;
+        if ((i == 1 && omit_optional) || (i == 0 && omit_spindle_speed)) {
+            slots[i].entries.slave.act_speed.bit_length = 0;
+            slots[i].entries.slave.target_speed.bit_length = 0;
+            slots[i].entries.slave.error_code.bit_length = 0;
+        }
         servo[i][DEV_DICT_ROLE_ACTUAL_POS] = 100;
         servo[i][DEV_DICT_ROLE_STATUS_WORD] = 0x40;
         servo[i][DEV_DICT_ROLE_MODE_DISPLAY] = i ? 8 : 9;
@@ -61,6 +76,16 @@ int ethercat_init(const MasterConfig* cfg) {
     return 0;
 }
 int ethercat_close(void) { ++closes; opened = 0; return 0; }
+const char* Master_StartupError(void) { return ""; }
+int Master_SlaveCount(void) { return opened ? 3 : 0; }
+const DEVICE_BASIC_INFO* device_identity_get(int pos) {
+    static DEVICE_BASIC_INFO ids[3] = {
+        {.ID=123, .CODE=456, .Serial=99},
+        {.ID=2252, .CODE=269418497, .Revision=1},
+        {.ID=2252, .CODE=269418498, .Revision=1}
+    };
+    return &ids[pos];
+}
 int DeviceTable_Get(const DeviceSlot** out) { if (out) *out = opened ? slots : NULL; return opened ? 4 : 0; }
 int Master_WaitCycle(void) {
     ++waits;
@@ -83,11 +108,14 @@ int Master_CommitCycle(void) {
 }
 int Master_ServoRead(int slot, DevDictRole role, uint32_t* out) {
     ++reads;
+    if (role == DEV_DICT_ROLE_ERROR_CODE && !slots[slot].entries.slave.error_code.bit_length) return -1;
+    if (role == DEV_DICT_ROLE_ACTUAL_SPEED && !slots[slot].entries.slave.act_speed.bit_length) return -1;
     if (fail_read) return -1;
     *out = servo[slot][role]; return 0;
 }
 int Master_ServoWrite(int slot, DevDictRole role, uint32_t value) {
     ++writes;
+    if (role == DEV_DICT_ROLE_TARGET_SPEED && !slots[slot].entries.slave.target_speed.bit_length) return -1;
     if (fail_write) return -1;
     servo[slot][role] = value; return 0;
 }
@@ -169,6 +197,10 @@ static void lifecycle(void) {
     CHECK(strstr(dict_error, "CNC_HAL_DEVICES_JSON") != NULL);
     fail_init = 0;
     CHECK(hal_context_start(c, NULL, 0) == 0);
+    CHECK(hal_slave_count(c) == 3);
+    HalCSlaveInfo slave;
+    CHECK(hal_slave_info(c, 0, &slave) == 0 && slave.axis_count == 2 && slave.identity.serial == 99);
+    CHECK(hal_slave_info(c, 1, &slave) == 0 && slave.axis_count == 0 && slave.identity.type == IO_MODEL_TYPE);
     CHECK(received_config.cycle_us == 1000 && received_config.cycle_timeout_ms == 2000);
     HalContext* other = create(&cfg);
     const int before = starts;
@@ -219,6 +251,36 @@ static void binding(void) {
     HalContext* c = create(&cfg);
     CHECK(hal_context_start(c, NULL, 0) == 0);
     hal_context_destroy(c);
+}
+
+static void optional_capabilities(void) {
+    HalCConfig cfg = config();
+    omit_optional = 1;
+    HalContext* c = create(&cfg);
+    CHECK(hal_context_start(c, NULL, 0) == 0);
+    HalCCapability cap;
+    CHECK(hal_axis_capability(c, 7, HAL_FUNC_POSITION, &cap) == 0 && cap.state == HAL_CAP_READY);
+    CHECK(hal_axis_capability(c, 7, HAL_FUNC_SPEED, &cap) == 0 && cap.state == HAL_CAP_UNSUPPORTED);
+    CHECK(cap.slave_pos == 0 && cap.axis_index == 1 && cap.reason[0]);
+    CHECK(hal_axis_capability(c, 7, HAL_FUNC_ERROR_CODE, &cap) == 0 && cap.state == HAL_CAP_UNSUPPORTED);
+    CHECK(hal_axis_capability(c, 7, HAL_FUNC_ALARM_CONTROL, &cap) == HAL_ERROR_ARGUMENT);
+    CHECK(hal_slave_capability(c, 0, HAL_FUNC_ALARM_CONTROL, &cap) == 0 &&
+          cap.state == HAL_CAP_NOT_CONFIGURED && cap.axis_index == -1);
+    CHECK(hal_axis_capability(c, 3, HAL_FUNC_SPEED, &cap) == 0 && cap.state == HAL_CAP_READY);
+    cycle(c);
+    HalCAxisStatus status;
+    CHECK(hal_rt_axis_read_status(c, 7, &status) == 0 && !status.error_code_valid);
+    CHECK(hal_rt_axis_read_status(c, 3, &status) == 0 && status.error_code_valid);
+    hal_context_destroy(c);
+    omit_optional = 0;
+
+    omit_spindle_speed = 1;
+    c = create(&cfg);
+    char error[160];
+    CHECK(hal_context_start(c, error, sizeof(error)) == HAL_ERROR_CONFIG);
+    CHECK(strstr(error, "从站 0 轴 0") && strstr(error, "主轴速度"));
+    hal_context_destroy(c);
+    omit_spindle_speed = 0;
 }
 
 static void motion_io(void) {
@@ -358,7 +420,7 @@ static void concurrent_stop(void) {
 }
 
 int main(void) {
-    lifecycle(); binding(); motion_io(); wrap_and_faults();
+    lifecycle(); binding(); optional_capabilities(); motion_io(); wrap_and_faults();
     stop_overrides_staged_enable(); concurrent_stop();
     printf("context_regression: %u checks passed\n", checks);
 }

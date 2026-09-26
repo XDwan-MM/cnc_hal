@@ -24,12 +24,22 @@ static void* servo_entry(int slot, DevDictRole role, int* is_tx) {
     }
 }
 
+MASTER_API int Master_ServoHasRole(int slot, DevDictRole role) {
+    int is_tx = 0;
+    const void* h = servo_entry(slot, role, &is_tx);
+    if (!h) return 0;
+    const uint32_t bits = is_tx ? ((const TxEntry_Unit*)h)->bit_length
+                                : ((const RxEntry_Unit*)h)->bit_length;
+    return bits > 0 && bits <= 32;
+}
+
 MASTER_API int Master_ServoRead(int slot, DevDictRole role, uint32_t* out) {
     if (!out) return -1;
 
     int is_tx = 0;
     TxEntry_Unit* h = (TxEntry_Unit*)servo_entry(slot, role, &is_tx);
-    if (!h || !is_tx || h->bit_length == 0) return -1;
+    if (!h || !is_tx) return -1;
+    if (h->bit_length == 0) return -2;
 
     const size_t nbytes = (size_t)((h->bit_length + 7) / 8);
     if (nbytes > sizeof(*out)) return -1;
@@ -41,7 +51,8 @@ MASTER_API int Master_ServoRead(int slot, DevDictRole role, uint32_t* out) {
 MASTER_API int Master_ServoWrite(int slot, DevDictRole role, uint32_t value) {
     int is_tx = 0;
     RxEntry_Unit* h = (RxEntry_Unit*)servo_entry(slot, role, &is_tx);
-    if (!h || is_tx || h->bit_length == 0 || h->bit_length > 32) return -1;
+    if (!h || is_tx || h->bit_length > 32) return -1;
+    if (h->bit_length == 0) return -2;
 
     return (GM_RxPdoEntry_Write(*h, value) != 0) ? -1 : 0;
 }

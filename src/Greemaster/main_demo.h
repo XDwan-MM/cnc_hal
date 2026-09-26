@@ -30,6 +30,8 @@ typedef struct {
 #define MASTER_STOP_REQUESTED (-28673)
 #define MASTER_START_TIMEOUT  (-28674)
 #define MASTER_DEVICE_DICTIONARY_ERROR (-28675)
+const char* Master_StartupError(void);
+int Master_SlaveCount(void);
 
 /* 设备字典路径：优先使用 CNC_HAL_DEVICES_JSON 环境变量；未设置时使用
  * 构建时指定的安装路径。直接编译源码而未指定默认路径时必须设置环境变量。

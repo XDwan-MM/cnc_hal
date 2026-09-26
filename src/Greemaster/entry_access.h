@@ -27,6 +27,9 @@ MASTER_API int Master_ServoRead(int slot, DevDictRole role, uint32_t* out);
  *  @return 0 成功；< 0 = 越界 / 角色没绑 / 方向不对（只写 Rx 侧）/ 写失败 */
 MASTER_API int Master_ServoWrite(int slot, DevDictRole role, uint32_t value);
 
+/* 只检查当前已绑定的 PDO 句柄，不向主站发通信请求。 */
+MASTER_API int Master_ServoHasRole(int slot, DevDictRole role);
+
 /** @brief 读词设备（面板 / IO 模块）的第 index 个输入 Entry。位长 1~32，值右对齐。
  *  @param slot        槽号
  *  @param index       Entry 序号（0 起）
