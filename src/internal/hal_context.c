@@ -7,6 +7,7 @@
 #include "Greemaster/device.h"
 #include "Greemaster/servo_step.h"
 #include "Greemaster/entry_access.h"
+#include "Greemaster/servo_role_binding.h"
 #include <math.h>
 #include <stdatomic.h>
 #include <time.h>
@@ -157,11 +158,9 @@ static int bind_axis(Axis* a, const DeviceSlot* slots, int count) {
         if (s->type != SERVO_TYPE && s->type != GREE_AXIS6_TYPE && s->type != GREE_AXIS4_TYPE) continue;
         a->slot = i;
         const slave_addr* h = &s->entries.slave;
-        if (h->statusWord.bit_length != 16 || h->act_pos.bit_length != 32 ||
-            h->act_mode.bit_length != 8 || h->Control_word.bit_length != 16 ||
-            h->target_pos.bit_length != 32 || h->Modes_of_operation.bit_length != 8)
+        if (!ServoRoles_BaseReady(h))
             return HAL_ERROR_UNSUPPORTED;
-        a->has_speed = h->act_speed.bit_length == 32 && h->target_speed.bit_length == 32;
+        a->has_speed = ServoRoles_SpeedReady(h);
         a->has_error = h->error_code.bit_length == 16;
         if (a->spindle && !a->has_speed) return HAL_ERROR_UNSUPPORTED;
         a->identity.type = s->type;

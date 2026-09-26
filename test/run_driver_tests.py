@@ -136,6 +136,8 @@ doc=copy.deepcopy(custom);doc["devices"][0]["objects"]["error_code"]["index"]="0
 case("duplicate_object",doc)
 cases.append("-"+str(OUT/"missing.json"))
 dictionary=build("dictionary_regression",["test/dictionary_regression.c","src/common/devdict.c"], extra=["-Wl,--wrap=malloc"])
+rules_helper=build("esi_rules", ["tools/esi_rules.c", "src/common/devdict.c"])
+ENV["CNC_HAL_ESI_RULES"] = str(rules_helper)
 if not BUILD_ONLY:
     print(run("dictionary_regression",[dictionary,ROOT/"src/Greemaster/devices.json",*cases]).strip())
     run("esi_topology_audit", ["python3", "-B", "test/test_esi_topology_audit.py"])

@@ -1,6 +1,8 @@
 #include "device.h"
 #include "slave_list.h"
 #include "common/devdict.h"
+#include "common/servo_roles.h"
+#include "servo_role_binding.h"
 
 static int position = 0;   /* 装配期的槽推进游标，仅本文件用 */
 static char g_bind_error[192];
@@ -338,16 +340,14 @@ static int COERequestResult(const DEVICE_BASIC_INFO* info, const unsigned char* 
  * 这组值对应原硬编码的 6 个 Tx + 4 个 Rx 请求，行为等价。
  * 注意原实现没有绑 target_torque（0x6071），这里也不绑。 */
 static const DevDictObject kDs402Std[] = {
-    {DEV_DICT_ROLE_STATUS_WORD,   0x6041, 0x00, 16, 1},
-    {DEV_DICT_ROLE_ACTUAL_POS,    0x6064, 0x00, 32, 1},
-    {DEV_DICT_ROLE_ERROR_CODE,    0x603F, 0x00, 16, 1},
-    {DEV_DICT_ROLE_MODE_DISPLAY,  0x6061, 0x00,  8, 1},
-    {DEV_DICT_ROLE_ACTUAL_SPEED,  0x606C, 0x00, 32, 1},
-    {DEV_DICT_ROLE_ACTUAL_TORQUE, 0x6077, 0x00, 16, 1},
-    {DEV_DICT_ROLE_CONTROL_WORD,  0x6040, 0x00, 16, 0},
-    {DEV_DICT_ROLE_TARGET_POS,    0x607A, 0x00, 32, 0},
-    {DEV_DICT_ROLE_TARGET_SPEED,  0x60FF, 0x00, 32, 0},
-    {DEV_DICT_ROLE_OP_MODE,       0x6060, 0x00,  8, 0},
+#define DEFAULT_0(...)
+#define DEFAULT_1(...) __VA_ARGS__
+#define SERVO_ROLE(name, id, index, bits, tx, type, base, speed, custom, standard, member) \
+    DEFAULT_##standard({DEV_DICT_ROLE_##id, index, 0, bits, tx},)
+#include "../common/servo_roles.def"
+#undef SERVO_ROLE
+#undef DEFAULT_0
+#undef DEFAULT_1
 };
 
 /* 每台从站的 EEPROM 身份，按【从站号】索引。
@@ -457,10 +457,7 @@ int servo_addr_config(Slave_info* list, uint32_t slave_pos, uint32_t slot) {
     for (int i = 0; i < count; ++i) {
         uint32_t pdo, entry;
         const DevDictRole role = objects[i].role;
-        const int required = role == DEV_DICT_ROLE_STATUS_WORD ||
-            role == DEV_DICT_ROLE_ACTUAL_POS || role == DEV_DICT_ROLE_MODE_DISPLAY ||
-            role == DEV_DICT_ROLE_CONTROL_WORD || role == DEV_DICT_ROLE_TARGET_POS ||
-            role == DEV_DICT_ROLE_OP_MODE;
+        const int required = ServoRole_Get(role)->base;
         if (find_object(slave, &objects[i], &pdo, &entry) != 0) {
             if (required) {
                 snprintf(g_bind_error, sizeof(g_bind_error),
@@ -474,9 +471,7 @@ int servo_addr_config(Slave_info* list, uint32_t slave_pos, uint32_t slot) {
             return -1;
     }
     const slave_addr* h = &g_device_data[slot].slave;
-    if (h->statusWord.bit_length != 16 || h->act_pos.bit_length != 32 ||
-        h->act_mode.bit_length != 8 || h->Control_word.bit_length != 16 ||
-        h->target_pos.bit_length != 32 || h->Modes_of_operation.bit_length != 8) {
+    if (!ServoRoles_BaseReady(h)) {
         snprintf(g_bind_error, sizeof(g_bind_error),
                  "从站 %u 槽 %u 缺少必需 DS402 角色", slave_pos, slot);
         return -1;

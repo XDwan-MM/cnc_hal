@@ -1,11 +1,12 @@
 # ESI 离线导入（v2）
 
-> 2026-09-27 N1：已完成 v2 数据证据契约，见 [字段规则与验证](esi-schema-v2.md)。本工具链用于开发诊断，尚未进入启动授权。旧审核器明确拒绝 v2；下一步 N2 修复依赖、类型、重复映射和证据判定后接通。`static_eligible` 不能作为准许运行的凭据。
+> 2026-09-27：N1/N2 已完成离线验收，v2 证据已接入角色依赖审核。`requirements_satisfied` 只表示静态依赖满足，不授权配置或运行。见 [字段规则](esi-schema-v2.md) 和 [审核契约](esi-audit-v2.md)。
 
 构建解析工具：
 
 ```sh
 bash tools/build_esi_extract.sh
+bash tools/build_esi_rules.sh
 ```
 
 将各厂商 ESI XML 放进本地目录，建立身份索引：
@@ -37,21 +38,20 @@ python3 test/test_esi_import.py build/esi_extract
 
 这些厂商文件只在临时目录用于验证，未纳入仓库。三菱的 [MR-J5 ESI 官方下载页](https://www.mitsubishielectric.co.jp/fa/download/software/detailsearch.page?infostatus=5_1_2&kisyu=%2Fservo&lang=2&mode=software&select=0&shiryoid=0000000040&softid=3&viewradio=0) 已定位，尚未取得文件验证。
 
-## 无从站时的拓扑审核（v1 历史原型）
+## 无从站时的拓扑审核（N2）
 
-此节记录旧审核原型的行为。新建的 v2 索引暂不能运行下面的审核命令，需等待 N2，不能通过手动改版本号绕过。旧 v1 索引可复现原型；快照 `test/fixtures/topology_delta_example.json` 只模拟一台台达伺服，不是实机扫描结果：
+先构建 C 字典适配器，再审核 v2 索引与本次计划：
 
 ```sh
-python3 tools/esi_topology_audit.py build/esi_catalog.json test/fixtures/topology_delta_example.json
-python3 test/test_esi_topology_audit.py
+bash tools/build_esi_rules.sh
+python3 -B tools/esi_topology_audit.py build/esi_catalog.json /path/to/topology-plan.json
+python3 -B test/test_esi_topology_audit.py
 ```
 
-拓扑快照每个从站必须给出 `slave_pos`、`vendor_id`、`product_code`、`revision`；伺服用途 `use` 可为 `position`、`spindle` 或尚未分配的 `unassigned`。若取得**当前实际启用**的 PDO 条目，再给出 `active_pdo_entries`，其中 `rx` 和 `tx` 分别是 `{index, subindex, bits}` 数组。不能把 ESI 候选 PDO 列表填进这个字段。缺省时审核结果是 `pending/pdo_unverified`，不会宣告功能已就绪。
+完整输入、状态与限制见 [N2 审核契约](esi-audit-v2.md)。每台从站的 `planned_pdo_entries` 是本次明确选择的计划，包含 rx/tx 数组及对象索引、子索引、位宽。缺少计划时保持 pending；不要求先取得实际启用 PDO 快照。现有 `topology_delta_example.json` 只有模拟身份及用途，因此仍会 pending。
 
-有实机时，在启动进程设置 `CNC_HAL_TOPOLOGY_SNAPSHOT=/path/to/topology.json`，驱动在读取 EEPROM 后、下发配置前写出相同结构。它带有 `pre_download_pdo_entries`（含 PDO 索引及条目），来源是 EEPROM 解析结果，缺少 PDO 类别时可能来自 `GM_PDO_Map_Get()`；**它不是已启用映射的读回**。驱动此时不知道机床用途，`use` 为 `unassigned`，离线审核仍会保持 `pending`。可在快照副本中依据机床配置补上 `use=position` 或 `spindle` 后审核；不要把 `pre_download_pdo_entries` 改名为 `active_pdo_entries`。
+审核复用生产 C 字典读取器，并与 C 绑定共享角色表；主轴要求实际速度与目标速度。检查位宽、类型、有符号性、重复映射及证据来源。必需角色缺证据会 blocked，可选功能静态不可用。缺少 ESI 声明仅意味着证据不足。所有结果均不授权配置或运行；多轴/IO 为 not_audited，alarm_control 为 undefined_rule。
 
-设置快照路径后，启动流程仍会继续下发和握手；该功能不是只扫描模式。写文件失败只输出错误并继续启动；扫描失败也可能留下上次文件。现阶段文件只用于诊断，不能作为自动启动授权缓存。
+有实机时，`CNC_HAL_TOPOLOGY_SNAPSHOT=/path/to/topology.json` 仍会在 EEPROM 读取后输出诊断快照。其 `pre_download_pdo_entries` 可能来自 EEPROM 解析或 `GM_PDO_Map_Get()` 回退，不是实际启用映射读回，也不会自动成为计划。驱动仍会继续下发及握手，快照功能不是只扫描模式；写文件失败会报告并继续，扫描失败可能留下旧文件。
 
-审核读取 `src/Greemaster/devices.json`，但 Python 的语法支持和角色表尚未与 C 读取器完全一致。当前普通 DS402 基础依赖相同；Python 对主轴只追加 `actual_speed`，而 C 实际要求 `actual_speed` 与 `target_speed`，此处为待修缺陷。结果区分 `object_missing`、`subindex_missing`、`bits_mismatch`、`esi_mapping_unknown`、`esi_access_unknown`、`not_in_current_pdo`、`pdo_unverified`、`pdo_pre_download` 和 `not_in_pre_download_pdo`。`object_missing` 仅说明提取结果未列出对象，不能证明设备无该对象。可选角色缺失不阻止报告中其他角色，但报告不会实际禁用运行函数；`alarm_control` 固定为 `undefined_rule`。格力多轴和 IO 当前为 `not_audited`。
-
-该工具只输出离线审核报告，尚未接入 `ethercat_init()`。现行 pending/active 快照判定是原型行为，不是目标启动契约。后续静态审核应对本次计划 PDO 作判断，下发成功、OP 和握手后再发布运行能力；不要求主站额外在线查字典或独立读回全部映射。
+当前审核没有接入 `ethercat_init()`。下一步 N3 拆分扫描、预检、下发边界，后续 N4 完整审核默认/强制映射、容量及 DC 等约束，N5 在整体下发、OP、握手成功后发布运行能力。

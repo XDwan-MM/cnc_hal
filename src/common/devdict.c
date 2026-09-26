@@ -2,6 +2,7 @@
 // 内置一个仅覆盖所需语法的最小 JSON 解析器 + schema 走查 + 两级匹配。
 // 全静态存储、启动时一次加载、单线程使用——见 devdict.h 顶部说明。
 #include "devdict.h"
+#include "servo_roles.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -388,20 +389,6 @@ typedef struct {
 
 static DictStore g_store;
 
-static const struct { const char* name; DevDictRole role; } kRoleTable[] = {
-    { "status_word",   DEV_DICT_ROLE_STATUS_WORD },
-    { "control_word",  DEV_DICT_ROLE_CONTROL_WORD },
-    { "target_pos",    DEV_DICT_ROLE_TARGET_POS },
-    { "actual_pos",    DEV_DICT_ROLE_ACTUAL_POS },
-    { "target_speed",  DEV_DICT_ROLE_TARGET_SPEED },
-    { "actual_speed",  DEV_DICT_ROLE_ACTUAL_SPEED },
-    { "actual_torque", DEV_DICT_ROLE_ACTUAL_TORQUE },
-    { "target_torque", DEV_DICT_ROLE_TARGET_TORQUE },
-    { "mode_display",  DEV_DICT_ROLE_MODE_DISPLAY },
-    { "error_code",    DEV_DICT_ROLE_ERROR_CODE },
-    { "op_mode",       DEV_DICT_ROLE_OP_MODE },
-};
-
 /**
  * @brief 角色名字符串 → 枚举（字典文件里 objects 的键）。
  * @param role 如 "status_word" / "target_pos"。
@@ -411,8 +398,8 @@ static const struct { const char* name; DevDictRole role; } kRoleTable[] = {
 DevDictRole DevDict_RoleFromString(const char* role) {
     size_t i;
     if (!role) return DEV_DICT_ROLE_COUNT;
-    for (i = 0; i < sizeof(kRoleTable) / sizeof(kRoleTable[0]); ++i)
-        if (strcmp(kRoleTable[i].name, role) == 0) return kRoleTable[i].role;
+    for (i = 0; i < DEV_DICT_ROLE_COUNT; ++i)
+        if (strcmp(ServoRole_Get((DevDictRole)i)->name, role) == 0) return (DevDictRole)i;
     return DEV_DICT_ROLE_COUNT;
 }
 
@@ -429,16 +416,14 @@ static int loadFail(char* err, int errLen, const char* msg, JNode* root, char* t
 static int parseObject(JNode* o, DevDictRole role, DevDictObject* out,
                        char* err, int errLen, const char* roleName) {
     static const char* const keys[] = {"index", "sub", "bits", "dir"};
-    static const uint8_t widths[DEV_DICT_ROLE_COUNT] = {16,16,32,32,32,32,16,16,8,16,8};
-    const int is_tx = role == DEV_DICT_ROLE_STATUS_WORD || role == DEV_DICT_ROLE_ACTUAL_POS ||
-                      role == DEV_DICT_ROLE_ACTUAL_SPEED || role == DEV_DICT_ROLE_ACTUAL_TORQUE ||
-                      role == DEV_DICT_ROLE_MODE_DISPLAY || role == DEV_DICT_ROLE_ERROR_CODE;
-    uint32_t index, sub = 0, bits = widths[role];
+    const ServoRoleSpec* spec = ServoRole_Get(role);
+    const int is_tx = spec->is_tx;
+    uint32_t index, sub = 0, bits = spec->bits;
     JNode* dir = jobj_get(o, "dir");
     if (!known_keys(o, keys, sizeof(keys)/sizeof(keys[0])) ||
         !jget_u32(o, "index", &index) || index == 0 || index > UINT16_MAX ||
         (jobj_get(o, "sub") && !jget_u32(o, "sub", &sub)) || sub > UINT8_MAX ||
-        (jobj_get(o, "bits") && !jget_u32(o, "bits", &bits)) || bits != widths[role] ||
+        (jobj_get(o, "bits") && !jget_u32(o, "bits", &bits)) || bits != spec->bits ||
         (dir && (dir->type != JV_STR || strcmp(dir->str, is_tx ? "tx" : "rx") != 0))) {
         if (err && errLen > 0)
             snprintf(err, (size_t)errLen, "objects.%s: 对象号、位宽、方向或字段非法", roleName);
@@ -462,23 +447,14 @@ static int entryHasRole(const DevDictEntry* entry, DevDictRole role) {
 /* custom 伺服必须能支撑当前 GmServoLink 的使能、位置和速度接口。 */
 static int validateCustomServo(const DevDictEntry* entry, int entryIndex,
                                char* err, int errLen) {
-    static const DevDictRole required[] = {
-        DEV_DICT_ROLE_STATUS_WORD, DEV_DICT_ROLE_CONTROL_WORD,
-        DEV_DICT_ROLE_TARGET_POS, DEV_DICT_ROLE_ACTUAL_POS,
-        DEV_DICT_ROLE_TARGET_SPEED, DEV_DICT_ROLE_ACTUAL_SPEED,
-        DEV_DICT_ROLE_ERROR_CODE, DEV_DICT_ROLE_OP_MODE, DEV_DICT_ROLE_MODE_DISPLAY,
-    };
-    static const char* const names[] = {
-        "status_word", "control_word", "target_pos", "actual_pos",
-        "target_speed", "actual_speed", "error_code", "op_mode", "mode_display",
-    };
     size_t i;
     if (strcmp(entry->type, "servo") != 0) return 1;
-    for (i = 0; i < sizeof(required) / sizeof(required[0]); ++i) {
-        if (!entryHasRole(entry, required[i])) {
+    for (i = 0; i < DEV_DICT_ROLE_COUNT; ++i) {
+        const ServoRoleSpec* spec = ServoRole_Get((DevDictRole)i);
+        if (spec->custom_required && !entryHasRole(entry, spec->role)) {
             if (err && errLen > 0)
                 snprintf(err, (size_t)errLen,
-                         "devices[%d]: custom servo 缺少必填对象 %s", entryIndex, names[i]);
+                         "devices[%d]: custom servo 缺少必填对象 %s", entryIndex, spec->name);
             return 0;
         }
     }

@@ -7,6 +7,7 @@ import pathlib
 import subprocess
 import sys
 import tempfile
+import xml.etree.ElementTree as ET
 
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -60,7 +61,48 @@ def main(extractor):
         run(extractor, temp / "broken.xml", expect=1)
 
     evidence_tests(extractor)
+    audit_integration(extractor)
     print("ESI v2 提取、证据来源、精确匹配、冲突和错误处理通过")
+
+
+def audit_integration(extractor):
+    from esi_topology_audit import audit, load_rules
+    from test_esi_topology_audit import EXPECTED, fixture
+    catalog, topology = fixture()
+    root = ET.Element("EtherCATInfo", Version="1.6")
+    ET.SubElement(ET.SubElement(root, "Vendor"), "Id").text = "477"
+    devices = ET.SubElement(ET.SubElement(root, "Descriptions"), "Devices")
+    device = ET.SubElement(devices, "Device")
+    ET.SubElement(device, "Type", ProductCode="271601776", RevisionNo="33818120").text = "Synthetic"
+    ET.SubElement(device, "Name").text = "Synthetic regression only"
+    for direction, tag, index, sm in (("rx", "RxPdo", 0x1600, 2), ("tx", "TxPdo", 0x1A00, 3)):
+        pdo = ET.SubElement(device, tag, Sm=str(sm))
+        ET.SubElement(pdo, "Index").text = str(index)
+        ET.SubElement(pdo, "Name").text = direction
+        for _, (obj, bits, d, dtype) in EXPECTED.items():
+            if d != direction:
+                continue
+            entry = ET.SubElement(pdo, "Entry")
+            for field, value in (("Index", obj), ("SubIndex", 0), ("BitLen", bits), ("DataType", dtype)):
+                ET.SubElement(entry, field).text = str(value)
+    with tempfile.TemporaryDirectory() as temp:
+        path = pathlib.Path(temp) / "synthetic.xml"
+        ET.ElementTree(root).write(path)
+        imported = import_file(path, extractor)
+        catalog["devices"][0]["device"] = imported["devices"][0]
+        rules = load_rules(ROOT / "src/Greemaster/devices.json")
+        report = audit(catalog, topology, rules)
+        assert report["slaves"][0]["decision"] == "requirements_satisfied"
+        assert report["runtime_ready"] is False
+        # Full XML -> KickCAT -> evidence -> role audit: same width, wrong type.
+        for entry in device.findall("RxPdo/Entry"):
+            if entry.findtext("Index") == str(0x607A):
+                entry.find("DataType").text = "REAL"
+        ET.ElementTree(root).write(path)
+        catalog["devices"][0]["device"] = import_file(path, extractor)["devices"][0]
+        report = audit(catalog, topology, rules)
+        assert report["slaves"][0]["roles"]["target_pos"]["state"] == "type_mismatch"
+        assert report["slaves"][0]["decision"] == "blocked"
 
 
 def evidence_tests(extractor):
