@@ -2,8 +2,8 @@
 
 - 创建日期：2026-09-26
 - 适用项目：`cnc_hal`
-- 状态：P0 方案核查完成，P1 实施中
-- 当前阶段：P1。实机集成验证列入 P4
+- 状态：P0 方案核查完成，P1 部分完成，P2 ESI 导入已启动
+- 当前阶段：P2 离线导入；实机集成验证列入 P4
 - 工作方式：按阶段交付，每阶段记录改动、验证结果和遗留问题；不一次性重写整个驱动。
 
 ## 1. 目标与已对齐需求
@@ -139,7 +139,7 @@ SDK 作者确认普通 SDO 需先执行 `GM_Config_Download_And_Active()`，且 
 
 ### P2：接入 ESI 导入、匹配与功能审核
 
-- [ ] 用首批真实 ESI 评估候选开源解析器，核对许可证及输出字段覆盖率。
+- [x] 用汇川 SV660N、安川 Sigma-X、台达 ASDA2-E 的公开 ESI 评估 KickCAT 解析器，核对许可证及身份、对象、PDO、SM、CoE 字段。
 - [ ] 建立统一描述格式、来源记录、缓存和精确身份索引。
 - [ ] 处理一个 XML 含多个设备 / 版本、描述冲突及兼容版本规则。
 - [ ] 关联功能定义，检查索引、子索引、类型、方向、权限和映射能力。
@@ -190,10 +190,11 @@ SDK 作者确认普通 SDO 需先执行 `GM_Config_Download_And_Active()`，且 
 
 - [ecmccfg ESI 工具](https://github.com/paulscherrerinstitute/ecmccfg/blob/master/utils/readme.md)：可参考 PDO 选择、配置生成和旧解析器 JSON 输出。
 - [linuxcnc-ethercat/esi-data](https://github.com/linuxcnc-ethercat/esi-data)：可参考批量 ESI 处理与设备目录。
-- [ethercat-rs/ethercat-esi](https://github.com/ethercat-rs/ethercat-esi)：可评估解析模型。
+- [ethercat-rs/ethercat-esi](https://github.com/ethercat-rs/ethercat-esi)：该项目当前对象字典 / CoE 解析不足，不选为本次解析实现。
+- [KickCAT](https://github.com/leducp/KickCAT)：已引入 ESI 解析所需源码，依赖与版本见 `third_party/README.md`，使用方式见 [ESI 离线导入](esi-import.md)。
 - 本机 SDK 参考：`/opt/GreeMaster/include/libGREEMASTER/GreeMasterAPI.h` 和 `/opt/GreeMaster/docs/`。
 
-候选尚未完成本项目适配测试。选型应检查真实样本、映射限制覆盖、可批处理性和许可证；功能绑定、机床用途策略及 FPGA 适配仍由本项目实现。
+KickCAT 已通过三家公开 ESI 的离线解析验证。厂商 ESI 未纳入仓库；设备的映射限制仍需结合手册和实机核查。功能绑定、机床用途策略及 FPGA 适配仍由本项目实现。
 
 ## 9. 执行记录
 
@@ -205,5 +206,6 @@ SDK 作者确认普通 SDO 需先执行 `GM_Config_Download_And_Active()`，且 
 | 2026-09-26 | P0 策略收敛 | 默认及强制 PDO 必须保留；可选映射在下发前由 ESI 和经验证的设备规则筛选；配置下发失败按整机启动失败处理 | P1 增加逐功能禁用与具体缺项诊断；P3 验证新增映射 |
 | 2026-09-26 | P0 方案完成 | 确认无需主站额外在线字典验证；`GM_PDO_Map_Get` 来源和逐项映射读回不阻断能力模型与 ESI 适配 | P4 完成真实硬件集成验证 |
 | 2026-09-26 | P1 首批实现 | 提供从站实例、轴位置/速度/故障码与从站报警控制能力查询；移除无依据的可选 PDO 自动补入；位置轴缺可选速度/故障码仍可运行，主轴缺速度阻止启动；ABI 2.3；离线回归通过 | 功能定义仍需扩展到设备规则和对象依赖；多轴硬编码和详细启动诊断继续完善；ESI 在 P2 接入 |
+| 2026-09-26 | P2 解析导入 | 引入 KickCAT ESI 解析源码和 TinyXML2；提取身份、CoE、PDO、SM、字典和 DC，建立三元组精确索引及 SHA-256 来源记录；汇川、安川、台达共 3 个公开 ESI、10 个设备版本离线解析成功；多版本、冲突及错误处理回归通过 | 尚未把索引接入启动流程；字典可能含合成条目，默认 PDO 与动态映射限制仍需审核；三菱官方 ESI 尚未实测 |
 
 每完成一个阶段，更新本表和对应复选框，记录修改文件、验证命令 / 设备、结果及未覆盖项。阶段完成后再推进依赖它的下一阶段。

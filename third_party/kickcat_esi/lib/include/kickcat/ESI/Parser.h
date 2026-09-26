@@ -1,0 +1,107 @@
+#ifndef KICKCAT_ESI_PARSER_H
+#define KICKCAT_ESI_PARSER_H
+
+#include <tinyxml2.h>
+#include <string>
+#include <tuple>
+#include <unordered_map>
+#include <vector>
+
+#include "kickcat/CoE/OD.h"
+#include "kickcat/ESI/Device.h"
+
+namespace kickcat::ESI
+{
+    class Parser
+    {
+    public:
+        Parser() = default;
+        ~Parser() = default;
+
+        CoE::Dictionary loadFile  (std::string const& file);
+        CoE::Dictionary loadString(std::string const& xml);
+
+        char const* vendor()  const { return vendor_name_.c_str(); }
+        char const* profile() const { return profile_no_.c_str();  }
+
+        std::vector<DeviceSummary> listDevices      (std::string const& file);
+        std::vector<DeviceSummary> listDevicesString(std::string const& xml);
+
+        Device loadDevice      (std::string const& file, DeviceFilter const& filter = {});
+        Device loadDeviceString(std::string const& xml,  DeviceFilter const& filter = {});
+
+        // Build every <Device> in the file from a single parse. Devices that fail
+        // to parse are skipped; their type + error is appended to `errors` (if given).
+        std::vector<Device> loadAllDevices(std::string const& file, std::vector<std::string>* errors = nullptr);
+
+        // Pure CoE-object synthesis from parsed PDO data (ETG.1000.6 layout),
+        // independent of any XML/parser state. Exposed for direct unit testing.
+        static CoE::Object buildMappingObject   (Pdo const& pdo, bool is_rx);
+        static CoE::Object buildAssignmentObject(std::vector<Pdo> const& pdos, uint16_t index, bool is_rx);
+
+        // Map an ESI basic-type label ("BOOL", "UINT", ...) to its CoE::DataType,
+        // whose value is the ETG SII data-type code. nullopt for unknown labels.
+        static std::optional<CoE::DataType> coeTypeFromLabel(std::string const& label);
+
+    private:
+        static std::optional<uint32_t> readHexDecAttr(tinyxml2::XMLElement* node, char const* name);
+
+        void openFile  (std::string const& file);
+        void openString(std::string const& xml);
+        void resolveTopLevel();
+
+        std::vector<DeviceSummary> listDevicesImpl();
+        Device                     loadDeviceImpl(DeviceFilter const& filter);
+        Device                     buildDeviceFromElement(tinyxml2::XMLElement* device_node);
+
+        tinyxml2::XMLElement* selectDevice(DeviceFilter const& filter);
+        DeviceSummary         summarize   (tinyxml2::XMLElement* device);
+
+        void parseSyncManagers(tinyxml2::XMLElement* device, std::vector<SmInfo>& out);
+        void parseSyncUnits   (tinyxml2::XMLElement* device, std::vector<SyncUnit>&    out);
+        void parseFmmus       (tinyxml2::XMLElement* device, std::vector<Fmmu>&        out);
+        void parseMailbox     (tinyxml2::XMLElement* device, std::optional<Mailbox>&   out);
+        void parsePdos        (tinyxml2::XMLElement* device, char const* element_name, std::vector<Pdo>& out);
+        void parseEeprom      (tinyxml2::XMLElement* device, std::optional<Eeprom>&    out);
+        void parseDc          (tinyxml2::XMLElement* device, std::optional<Dc>&        out);
+
+        CoE::Dictionary buildDictionary(tinyxml2::XMLElement* profile,
+                                        std::vector<SmInfo> const& sms);
+
+        // Materializes the data objects (e.g. 0x3xxx/0x6xxx/0x7xxx) referenced by
+        // <Pdo>/<Entry> but not declared in <Dictionary>, so the mapping resolves.
+        void synthesizePdoTargetObjects(Device& device);
+
+        // Appends 0x16xx/0x1Axx mapping objects and 0x1C12/0x1C13 SM-assignment
+        // objects to the dictionary based on the parsed Pdo lists, but only
+        // for objects that aren't already declared in <Dictionary>/<Objects>.
+        void synthesizePdoMappingObjects(Device& device);
+
+        std::vector<uint8_t> loadHexBinary(tinyxml2::XMLElement* node);
+
+        void loadDefaultData(tinyxml2::XMLNode* node, CoE::Object& obj, CoE::Entry& entry);
+        uint16_t loadAccess(tinyxml2::XMLNode* node);
+
+        static constexpr int MAX_TYPE_DEPTH = 16;
+
+        std::tuple<CoE::DataType, uint16_t, uint16_t> parseType(tinyxml2::XMLNode* node);
+        CoE::DataType         resolveType (std::string const& type_name, int depth = 0);
+        tinyxml2::XMLNode*    findNodeType(tinyxml2::XMLNode* node, std::string const& where);
+
+        CoE::Object createObject(tinyxml2::XMLNode* node);
+
+        tinyxml2::XMLDocument doc_;
+        tinyxml2::XMLElement* root_       = nullptr;
+        tinyxml2::XMLElement* vendor_xml_ = nullptr;
+        tinyxml2::XMLElement* devices_    = nullptr;
+
+        tinyxml2::XMLElement* dtypes_ = nullptr;
+
+        std::string vendor_name_;
+        std::string profile_no_;
+
+        static const std::unordered_map<std::string, CoE::DataType> BASIC_TYPES;
+    };
+}
+
+#endif

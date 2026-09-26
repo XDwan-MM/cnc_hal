@@ -1,0 +1,102 @@
+#ifndef KICKCAT_ERROR_H
+#define KICKCAT_ERROR_H
+
+#include <cstdint>
+#include <exception>
+#include <system_error>
+
+#include "KickCAT.h"
+
+namespace kickcat
+{
+    constexpr const char* strip_path(const char* path)
+    {
+        const char* file = path;
+        while (*path)
+        {
+            if (*path++ == '/')
+            {
+                file = path;
+            }
+            if (*path == ':')
+            {
+                break;
+            }
+        }
+        return file;
+    }
+
+    #define STR1(x) #x
+    #define STR2(x) STR1(x)
+    #define LOCATION(suffix) kickcat::strip_path(__FILE__ ":" STR2(__LINE__) suffix)
+    #define THROW_ERROR(msg)                    (throw kickcat::Error{LOCATION(": " msg)})
+    #define THROW_ERROR_CODE(msg, cat, code)    (throw kickcat::ErrorCode<cat>{LOCATION(": " msg), static_cast<int32_t>(code)})
+    #define THROW_ERROR_DATAGRAM(msg, state)    (throw kickcat::ErrorDatagram{LOCATION(": " msg), state})
+    #define THROW_SYSTEM_ERROR_CODE(msg, code)  (throw std::system_error(code, std::generic_category(), LOCATION(": " msg)))
+    #define THROW_SYSTEM_ERROR(msg)             THROW_SYSTEM_ERROR_CODE(msg, errno)
+
+    namespace error::category
+    {
+        constexpr int32_t AL  = 1;
+        constexpr int32_t CoE = 2;
+        constexpr int32_t FoE = 3;
+    }
+
+    struct Error : public std::exception
+    {
+        Error(char const* message)
+            : message_(message)
+        { }
+
+        char const* what() const noexcept override
+        {
+            return message_;
+        }
+
+    private:
+        char const* message_;
+    };
+
+    template<int32_t CAT>
+    struct ErrorCode final : public Error
+    {
+        ErrorCode(char const* message, int32_t code)
+            : Error(message)
+            , code_{code}
+        { }
+
+        int32_t category() const noexcept
+        {
+            return CAT;
+        }
+
+        int32_t code() const noexcept
+        {
+            return code_;
+        }
+
+    private:
+        int32_t code_;
+    };
+    using ErrorAL  = ErrorCode<error::category::AL>;
+    using ErrorCoE = ErrorCode<error::category::CoE>;
+    using ErrorFoE = ErrorCode<error::category::FoE>;
+
+    struct ErrorDatagram final : public Error
+    {
+        ErrorDatagram(char const* message, DatagramState state)
+            : Error(message)
+            , state_(state)
+        { }
+
+        DatagramState state() const noexcept
+        {
+            return state_;
+        }
+
+    private:
+        DatagramState state_;
+    };
+}
+
+#endif

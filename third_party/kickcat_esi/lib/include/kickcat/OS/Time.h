@@ -1,0 +1,45 @@
+#ifndef KICKCAT_TIME_H
+#define KICKCAT_TIME_H
+
+#include <chrono>
+#include <system_error>
+
+namespace kickcat
+{
+    using namespace std::chrono;
+    // double, not float despite the name: a float second count loses sub-ms resolution after ~30 min.
+    using seconds_f = std::chrono::duration<double>;
+
+    void sleep(nanoseconds ns);
+
+    // Monotonic/steady clock in ns. Use this for every timeout, deadline,
+    // watchdog and delta: it never jumps backward and is immune to wall-clock
+    // adjustments. This is the primitive; wall-clock time is only for DC below.
+    nanoseconds now();
+
+    // return time in ns since the processus start
+    nanoseconds since_start();
+
+    // return the time since since another point in time
+    nanoseconds elapsed_time(nanoseconds start = now());
+
+    // Wall-clock ns since the Unix epoch (1970-01-01).
+    nanoseconds since_unix_epoch();
+
+    // Convert an std::chrono duration to a POSIX timespec
+    constexpr timespec to_timespec(nanoseconds time)
+    {
+        auto secs = duration_cast<seconds>(time);
+        nanoseconds nsecs = (time - secs);
+        return timespec{static_cast<time_t>(secs.count()), static_cast<long>(nsecs.count())};
+    }
+
+    // Convert a POSIX timespec to a std::chrono duration
+    constexpr nanoseconds from_timespec(timespec time)
+    {
+        auto duration = seconds{time.tv_sec} + nanoseconds{time.tv_nsec};
+        return duration_cast<nanoseconds>(duration);
+    }
+}
+
+#endif
