@@ -1,4 +1,6 @@
 #include <algorithm>
+#include <cstdarg>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 #include <map>
@@ -13,6 +15,23 @@ using namespace tinyxml2;
 
 namespace kickcat::ESI
 {
+
+// cnc_hal evidence patch: collect warnings even when debug output is disabled.
+void Parser::warning(char const* code, char const* format, ...)
+{
+    va_list args;
+    va_start(args, format);
+    va_list copy;
+    va_copy(copy, args);
+    int size = std::vsnprintf(nullptr, 0, format, copy);
+    va_end(copy);
+    if (size >= 0) {
+        std::vector<char> buffer(static_cast<std::size_t>(size) + 1);
+        std::vsnprintf(buffer.data(), buffer.size(), format, args);
+        diagnostics_.push_back({code, std::string(buffer.data(), static_cast<std::size_t>(size))});
+    }
+    va_end(args);
+}
 
 const std::unordered_map<std::string, CoE::DataType> Parser::BASIC_TYPES
 {
@@ -531,6 +550,7 @@ std::vector<Device> Parser::loadAllDevices(std::string const& file, std::vector<
 
 Device Parser::buildDeviceFromElement(XMLElement* device_node)
 {
+    diagnostics_.clear();
     profile_no_.clear();  // per-device: don't leak a prior device's value via profile()
     Device device;
     device.vendor_name = vendor_name_;
@@ -579,8 +599,11 @@ Device Parser::buildDeviceFromElement(XMLElement* device_node)
     // Modular-device composition (<Slots>/<ModuleGroups>) is not modeled.
 
     device.dictionary = buildDictionary(profile_node, device.sync_managers);
-    synthesizePdoTargetObjects(device);
-    synthesizePdoMappingObjects(device);
+    if (synthesis_enabled_) {
+        synthesizePdoTargetObjects(device);
+        synthesizePdoMappingObjects(device);
+    }
+    device.diagnostics = diagnostics_;
     return device;
 }
 
@@ -845,7 +868,7 @@ void Parser::parsePdos(XMLElement* device, char const* element_name, std::vector
             {
                 // Shipped devices re-declare an index on another SM (Beckhoff
                 // EL2252 RxPdo 0x1602): keep both, downstream groups per SM.
-                esi_warning("ESI: duplicate %s <Index> 0x%04x\n", element_name, pdo.index);
+                warning("duplicate_pdo_index", "ESI: duplicate %s <Index> 0x%04x\n", element_name, pdo.index);
                 break;
             }
         }
@@ -1188,7 +1211,7 @@ void Parser::synthesizePdoMappingObjects(Device& device)
             }
             catch (std::exception const& e)
             {
-                esi_warning("Skipping PDO mapping 0x%04x: %s\n", pdo.index, e.what());
+                warning("pdo_mapping_skipped", "Skipping PDO mapping 0x%04x: %s\n", pdo.index, e.what());
             }
         }
     };
@@ -1319,7 +1342,7 @@ void Parser::synthesizePdoMappingObjects(Device& device)
 
             uint32_t fixed = CoE::toMappingWord({index, static_cast<uint8_t>(found_sub), bits});
             std::memcpy(entry.data, &fixed, sizeof(uint32_t));
-            esi_warning("PDO 0x%04x: retargeted mapping 0x%04x:%u -> 0x%04x:%d (object declares data there)\n",
+            warning("pdo_mapping_retargeted", "PDO 0x%04x: retargeted mapping 0x%04x:%u -> 0x%04x:%d (object declares data there)\n",
                 obj.index, index, sub, index, found_sub);
         }
     }
@@ -1614,7 +1637,7 @@ CoE::Dictionary Parser::buildDictionary(XMLElement* profile, std::vector<SmInfo>
     // Synthesize CoE object 0x1C00 (Sync Manager Communication Type) from the
     // device's <Sm> declarations so callers of loadFile/loadString still get an
     // SM-type array in their CoE::Dictionary. An explicit 0x1C00 in the ESI wins.
-    if (dictionaryContains(out, 0x1C00))
+    if (not synthesis_enabled_ or dictionaryContains(out, 0x1C00))
     {
         return out;
     }
@@ -1729,7 +1752,7 @@ void Parser::loadDefaultData(XMLNode* node, CoE::Object& obj, CoE::Entry& entry)
 
         if (data.size() != ((entry.bitlen + 7u) / 8u))
         {
-            esi_warning("Cannot load default data for 0x%04x.%d, expected size mismatch.\n"
+            warning("default_data_size_mismatch", "Cannot load default data for 0x%04x.%d, expected size mismatch.\n"
                     "-> Got %ld bits, expected: %d bit\n"
                     "==> Skipping entry\n",
                 obj.index, entry.subindex,

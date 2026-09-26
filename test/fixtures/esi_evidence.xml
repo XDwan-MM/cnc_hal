@@ -1,0 +1,34 @@
+<?xml version="1.0"?>
+<!-- Authored minimal regression fixture; no real device identity or authorization. -->
+<EtherCATInfo Version="1.6">
+  <Vendor><Id>#xCAFE</Id><Name>Evidence test</Name></Vendor>
+  <Descriptions><Devices><Device>
+    <Type ProductCode="#x3300" RevisionNo="0">Evidence</Type><Name>Evidence</Name>
+    <Profile><ProfileNo>402</ProfileNo><Dictionary>
+      <DataTypes>
+        <DataType><Name>UDINT</Name><BitSize>32</BitSize></DataType>
+        <DataType><Name>MAP</Name><BitSize>40</BitSize>
+          <SubItem><SubIdx>0</SubIdx><Name>Count</Name><Type>USINT</Type><BitSize>8</BitSize><BitOffs>0</BitOffs><Info><DefaultData>01</DefaultData></Info></SubItem>
+          <SubItem><SubIdx>1</SubIdx><Name>Mapping</Name><Type>UDINT</Type><BitSize>32</BitSize><BitOffs>8</BitOffs><Info><DefaultData>20000020</DefaultData></Info></SubItem>
+        </DataType>
+        <DataType><Name>RECORD</Name><BitSize>48</BitSize>
+          <SubItem><SubIdx>0</SubIdx><Name>Count</Name><Type>USINT</Type><BitSize>8</BitSize><BitOffs>0</BitOffs></SubItem>
+          <SubItem><SubIdx>1</SubIdx><Name>Value</Name><Type>UDINT</Type><BitSize>32</BitSize><BitOffs>16</BitOffs><Flags><Access>ro</Access><PdoMapping>T</PdoMapping></Flags></SubItem>
+        </DataType>
+      </DataTypes>
+      <Objects>
+        <Object><Index>#x1600</Index><Name>Declared mapping</Name><Type>MAP</Type><BitSize>40</BitSize></Object>
+        <Object><Index>#x2000</Index><Name>Explicit</Name><Type>UDINT</Type><BitSize>32</BitSize><Flags><Access>rw</Access><PdoMapping>R</PdoMapping></Flags></Object>
+        <Object><Index>#x2001</Index><Name>No flags</Name><Type>UDINT</Type><BitSize>32</BitSize></Object>
+        <Object><Index>#x2002</Index><Name>Record</Name><Type>RECORD</Type><BitSize>48</BitSize></Object>
+      </Objects>
+    </Dictionary></Profile>
+    <Mailbox><CoE PdoAssign="0"/></Mailbox>
+    <RxPdo Sm="2" Fixed="0"><Index>#x1600</Index><Name>Output</Name>
+      <Entry><Index>#x6FFF</Index><SubIndex>0</SubIndex><BitLen>32</BitLen><DataType>UDINT</DataType><Name>PDO only</Name></Entry>
+    </RxPdo>
+    <TxPdo Sm="3"><Index>#x1A00</Index><Name>Retarget</Name>
+      <Entry><Index>#x2002</Index><SubIndex>17</SubIndex><BitLen>32</BitLen><DataType>UDINT</DataType></Entry>
+    </TxPdo>
+  </Device></Devices></Descriptions>
+</EtherCATInfo>

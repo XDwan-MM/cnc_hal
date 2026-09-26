@@ -18,6 +18,9 @@ namespace kickcat::ESI
         Parser() = default;
         ~Parser() = default;
 
+        // cnc_hal evidence patch: expose the parsed dictionary before synthesis.
+        void setSynthesisEnabled(bool enabled) { synthesis_enabled_ = enabled; }
+
         CoE::Dictionary loadFile  (std::string const& file);
         CoE::Dictionary loadString(std::string const& xml);
 
@@ -44,6 +47,9 @@ namespace kickcat::ESI
         static std::optional<CoE::DataType> coeTypeFromLabel(std::string const& label);
 
     private:
+        bool synthesis_enabled_ = true;
+        std::vector<Device::Diagnostic> diagnostics_;
+        void warning(char const* code, char const* format, ...);
         static std::optional<uint32_t> readHexDecAttr(tinyxml2::XMLElement* node, char const* name);
 
         void openFile  (std::string const& file);

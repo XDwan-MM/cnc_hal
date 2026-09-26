@@ -290,6 +290,9 @@ namespace kickcat::ESI
 
     struct Device
     {
+        // cnc_hal evidence patch: retain parser warnings per device.
+        struct Diagnostic { std::string code; std::string message; };
+        std::vector<Diagnostic> diagnostics;
         std::string  type;
         uint32_t     product_code = 0;
         uint32_t     revision_no  = 0;

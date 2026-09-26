@@ -2,13 +2,13 @@
 """离线 ESI 目录：按 Vendor ID / Product Code / Revision 精确索引。"""
 
 import argparse
-import hashlib
 import json
 import os
 import pathlib
-import subprocess
 import sys
 import tempfile
+
+from esi_evidence import ADAPTER_VERSION, SCHEMA_VERSION, import_file
 
 
 def identity(device):
@@ -22,13 +22,17 @@ def build(directory, output, extractor):
         raise ValueError(f"目录中没有 ESI XML：{directory}")
 
     catalog = {}
+    parser_metadata = None
+    import_diagnostics = []
     for path in files:
-        result = subprocess.run([str(extractor), str(path)], capture_output=True, text=True)
-        if result.returncode:
-            raise ValueError(f"解析失败：{path}\n{result.stderr.strip()}")
-        parsed = json.loads(result.stdout)
-        digest = hashlib.sha256(path.read_bytes()).hexdigest()
-        for device in parsed["devices"]:
+        parsed = import_file(path, extractor)
+        if parser_metadata is not None and parser_metadata != parsed["parser"]:
+            raise ValueError("导入期间解析器版本变化")
+        parser_metadata = parsed["parser"]
+        import_diagnostics.extend({"source": str(path), **d} for d in parsed["import_diagnostics"])
+        digest = parsed["sha256"]
+        for ordinal, device in enumerate(parsed["devices"]):
+            source = {"path": str(path), "sha256": digest, "device_ordinal": ordinal}
             key = identity(device)
             if key in catalog:
                 previous = catalog[key]
@@ -37,18 +41,20 @@ def build(directory, output, extractor):
                         f"相同身份的 ESI 描述冲突 {key}："
                         f"{previous['source']} 与 {path}"
                     )
-                previous["sources"].append({"path": str(path), "sha256": digest})
+                previous["sources"].append(source)
             else:
                 catalog[key] = {
                     "identity": dict(zip(("vendor_id", "product_code", "revision"), key)),
                     "source": str(path),
                     "sha256": digest,
-                    "sources": [{"path": str(path), "sha256": digest}],
+                    "sources": [source],
                     "device": device,
                 }
     output.parent.mkdir(parents=True, exist_ok=True)
     document = json.dumps(
-        {"schema_version": 1, "devices": [catalog[k] for k in sorted(catalog)]},
+        {"schema_version": SCHEMA_VERSION, "parser": parser_metadata,
+         "adapter_version": ADAPTER_VERSION, "import_diagnostics": import_diagnostics,
+         "devices": [catalog[k] for k in sorted(catalog)]},
         ensure_ascii=False, indent=2,
     ) + "\n"
     temporary = None
@@ -66,6 +72,8 @@ def build(directory, output, extractor):
 
 def lookup(catalog_path, vendor, product, revision):
     catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+    if catalog.get("schema_version") != SCHEMA_VERSION:
+        raise ValueError("索引格式已升级到 v2，请从原始 ESI 重新导入")
     key = (vendor, product, revision)
     for item in catalog["devices"]:
         if identity(item["identity"]) == key:

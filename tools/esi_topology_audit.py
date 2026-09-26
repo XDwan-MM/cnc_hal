@@ -128,6 +128,8 @@ def check_role(device, active, pre_download, specification):
 
 
 def audit(catalog, topology, rules):
+    if catalog.get("schema_version") == 2:
+        raise ValueError("ESI v2 证据审核待 N2 接入；当前原型不能将解析值作为启动授权")
     if catalog.get("schema_version") != 1 or topology.get("schema_version") != 1:
         raise ValueError("ESI 索引或拓扑快照版本无效")
     if not isinstance(topology.get("slaves"), list):

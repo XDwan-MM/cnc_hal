@@ -31,6 +31,12 @@ def fixture():
 
 
 class AuditTests(unittest.TestCase):
+    def test_v2_evidence_is_not_silently_authorized(self):
+        catalog, topology = fixture()
+        catalog["schema_version"] = 2
+        with self.assertRaisesRegex(ValueError, "N2"):
+            audit(catalog, topology, self.rules)
+
     @classmethod
     def setUpClass(cls):
         cls.rules = load_rules(ROOT / "src/Greemaster/devices.json")

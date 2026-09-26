@@ -75,7 +75,43 @@ void pdo_list(const std::vector<kickcat::ESI::Pdo>& pdos) {
     std::cout << ']';
 }
 
-void device(const kickcat::ESI::Device& dev) {
+void objects(const kickcat::CoE::Dictionary& dictionary) {
+    std::cout << '[';
+    bool first = true;
+    for (const auto& object : dictionary) {
+        if (!first) std::cout << ',';
+        first = false;
+        std::cout << "{\"index\":" << object.index << ",\"name\":";
+        quoted(object.name);
+        std::cout << ",\"entries\":[";
+        bool first_entry = true;
+        for (const auto& entry : object.entries) {
+            if (!first_entry) std::cout << ',';
+            first_entry = false;
+            std::cout << "{\"subindex\":" << static_cast<unsigned>(entry.subindex)
+                      << ",\"bits\":" << entry.bitlen
+                      << ",\"bit_offset\":" << entry.bitoff
+                      << ",\"type\":" << static_cast<unsigned>(entry.type)
+                      << ",\"access\":" << entry.access << ",\"default_data\":";
+            if (!entry.data) std::cout << "null";
+            else {
+                constexpr char hex[] = "0123456789abcdef";
+                std::string value;
+                const auto* bytes = static_cast<const unsigned char*>(entry.data);
+                for (size_t i = 0; i < (entry.bitlen + 7u) / 8u; ++i) {
+                    value += hex[bytes[i] >> 4];
+                    value += hex[bytes[i] & 15];
+                }
+                quoted(value);
+            }
+            std::cout << '}';
+        }
+        std::cout << "]}";
+    }
+    std::cout << ']';
+}
+
+void device(const kickcat::ESI::Device& dev, const kickcat::ESI::Device& declared) {
     std::cout << "{\"vendor_id\":" << dev.vendor_id
               << ",\"product_code\":" << dev.product_code
               << ",\"revision\":" << dev.revision_no << ",\"type\":";
@@ -108,24 +144,22 @@ void device(const kickcat::ESI::Device& dev) {
     std::cout << ",\"tx_pdos\":";
     pdo_list(dev.tx_pdos);
     /* KickCAT 会根据 PDO 合成缺失的字典条目；调用方不得把这些权限当作设备实测权限。 */
-    std::cout << ",\"objects_may_be_synthesized\":true,\"objects\":[";
-    bool first_object = true;
-    for (const auto& object : dev.dictionary) {
-        if (!first_object) std::cout << ',';
-        first_object = false;
-        std::cout << "{\"index\":" << object.index << ",\"name\":";
-        quoted(object.name);
-        std::cout << ",\"entries\":[";
-        bool first_entry = true;
-        for (const auto& entry : object.entries) {
-            if (!first_entry) std::cout << ',';
-            first_entry = false;
-            std::cout << "{\"subindex\":" << static_cast<unsigned>(entry.subindex)
-                      << ",\"bits\":" << entry.bitlen
-                      << ",\"type\":" << static_cast<unsigned>(entry.type)
-                      << ",\"access\":" << entry.access << '}';
+    std::cout << ",\"objects_may_be_synthesized\":true,\"objects\":";
+    objects(dev.dictionary);
+    std::cout << ",\"declared_dictionary\":";
+    objects(declared.dictionary);
+    std::cout << ",\"parser_diagnostics\":[";
+    bool first_diagnostic = true;
+    for (const auto& stage : {std::make_pair("declared", &declared),
+                              std::make_pair("normalized", &dev)}) {
+        for (const auto& diagnostic : stage.second->diagnostics) {
+            if (!first_diagnostic) std::cout << ',';
+            first_diagnostic = false;
+            std::cout << "{\"stage\":"; quoted(stage.first);
+            std::cout << ",\"code\":"; quoted(diagnostic.code);
+            std::cout << ",\"message\":"; quoted(diagnostic.message);
+            std::cout << '}';
         }
-        std::cout << "]}";
     }
     std::cout << "],\"dc_modes\":[";
     if (dev.dc) {
@@ -151,17 +185,22 @@ int main(int argc, char** argv) {
         kickcat::ESI::Parser parser;
         std::vector<std::string> errors;
         const auto devices = parser.loadAllDevices(argv[1], &errors);
-        if (!errors.empty() || devices.empty()) {
+        parser.setSynthesisEnabled(false);
+        const auto declared = parser.loadAllDevices(argv[1], &errors);
+        if (!errors.empty() || devices.empty() || devices.size() != declared.size()) {
             for (const auto& error : errors) std::cerr << error << '\n';
             if (devices.empty()) std::cerr << "ESI 没有可解析的设备\n";
             return 1;
         }
-        std::cout << "{\"schema_version\":1,\"source\":";
+        std::cout << "{\"schema_version\":2,\"parser\":{\"name\":\"KickCAT\","
+                     "\"revision\":\"089f8cad4e852ea3b9e1d0b407425abe7440e3f3\","
+                     "\"patch\":\"cnc-hal-evidence-1\","
+                     "\"tinyxml2_revision\":\"8224e427b655b83dae5e2298f1e6919523a78737\"},\"source\":";
         quoted(argv[1]);
         std::cout << ",\"devices\":[";
         for (size_t i = 0; i < devices.size(); ++i) {
             if (i) std::cout << ',';
-            device(devices[i]);
+            device(devices[i], declared[i]);
         }
         std::cout << "]}\n";
         return std::cout.good() ? 0 : 1;

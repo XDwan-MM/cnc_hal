@@ -1,6 +1,6 @@
-# ESI 离线导入（首版）
+# ESI 离线导入（v2）
 
-> 2026-09-27 复核：本工具链目前用于开发诊断，尚未进入启动授权。已确认审核漏查主轴目标速度、类型与重复映射，并未使用解析合成来源标记；`static_eligible` 不能作为准许运行的凭据。已知问题、实际进度和修复顺序见 [项目复核](review-2026-09-27.md)，下一步先修正数据证据契约。
+> 2026-09-27 N1：已完成 v2 数据证据契约，见 [字段规则与验证](esi-schema-v2.md)。本工具链用于开发诊断，尚未进入启动授权。旧审核器明确拒绝 v2；下一步 N2 修复依赖、类型、重复映射和证据判定后接通。`static_eligible` 不能作为准许运行的凭据。
 
 构建解析工具：
 
@@ -15,11 +15,11 @@ python3 tools/esi_catalog.py build /path/to/esi build/esi_catalog.json
 python3 tools/esi_catalog.py lookup build/esi_catalog.json 0x1dd 0x10305070 0x2040608
 ```
 
-`lookup` 的三个参数依次为主站扫描得到的 Vendor ID、Product Code、Revision，可用十进制或 `0x` 十六进制。索引按三元组精确匹配，不自动选用相邻修订版。同一身份的已提取字段有差异时导入失败；相同描述可保留多个来源。未提取的限制差异尚不能检测。索引记录 ESI 路径和 SHA-256，重新导入时重新解析；查询不会检查原文件是否变更，目前也不保存解析器版本。XML 留在本地，不由运行中的主站下载。
+`lookup` 的三个参数依次为主站扫描得到的 Vendor ID、Product Code、Revision，可用十进制或 `0x` 十六进制。索引按三元组精确匹配，不自动选用相邻修订版。同身份的描述或证据（包括 Device/Vendor 原始树）不同会拒绝合并；相同描述保留多个来源。索引记录 ESI 路径、SHA-256、设备序号、解析器及适配器版本。重新导入时重新解析；查询不检查原文件是否变更。XML 留在本地，不由运行中的主站下载。v1 必须从原 XML 重新构建。
 
-提取结果 `schema_version=1`，每个设备包含身份、SM、CoE 标志、Rx/Tx PDO 候选、对象和子索引、访问位、位宽、数据类型、DC 模式。`objects[].entries[].access` 沿用 KickCAT 的位定义：读 PreOP/SafeOP/OP 为 `1/2/4`，写 PreOP/SafeOP/OP 为 `8/16/32`，RxPDO/TxPDO 标志为 `64/128`。`coe=null` 表示 ESI 未声明 CoE 邮箱。
+索引 `schema_version=2`，每个设备包含身份、SM、CoE 标志、Rx/Tx PDO 候选、对象、DC 模式及 `evidence`。旧投影 `objects[].entries[].access` 沿用 KickCAT 位定义：读 PreOP/SafeOP/OP 为 `1/2/4`，写为 `8/16/32`，RxPDO/TxPDO 为 `64/128`；它仅作解析诊断。`coe=null` 表示未声明 CoE 邮箱。字段声明及权限来源应查 `evidence`。
 
-**限制：**KickCAT 会从 PDO 声明补出对象字典条目、类型及访问位，还可能修正映射对象，故 `objects_may_be_synthesized=true`。目前没有逐字段来源，审核器也未检查该标记，不能将这些位直接当作明确的读写或重映射许可。PDO 列表是 ESI 候选配置；DC/SM/PDO 等约束尚未完整输出。功能绑定需要本项目的设备规则、完整计划和下发结果；当前导入工具尚未改变启动行为。
+**限制：**KickCAT 会补出字典条目、默认权限并修正映射。v2 保存相应来源、警告与差异；缺少声明的权限为 null，不升级成设备许可。Device 内 DC/SM/PDO 等声明树已保存，但完整约束语义、数组及模块组合审核仍待实现。PDO 列表是候选配置。功能绑定还需要设备规则、计划和下发结果；当前导入工具未改变启动行为。
 
 离线回归：
 
@@ -37,9 +37,9 @@ python3 test/test_esi_import.py build/esi_extract
 
 这些厂商文件只在临时目录用于验证，未纳入仓库。三菱的 [MR-J5 ESI 官方下载页](https://www.mitsubishielectric.co.jp/fa/download/software/detailsearch.page?infostatus=5_1_2&kisyu=%2Fservo&lang=2&mode=software&select=0&shiryoid=0000000040&softid=3&viewradio=0) 已定位，尚未取得文件验证。
 
-## 无从站时的拓扑审核
+## 无从站时的拓扑审核（v1 历史原型）
 
-用与 EEPROM 扫描相同的有序身份数据制作拓扑快照。可先用 `test/fixtures/topology_delta_example.json` 演练；它只模拟一台台达伺服，不是实机扫描结果。将上面的台达 ESI 放入导入目录后运行：
+此节记录旧审核原型的行为。新建的 v2 索引暂不能运行下面的审核命令，需等待 N2，不能通过手动改版本号绕过。旧 v1 索引可复现原型；快照 `test/fixtures/topology_delta_example.json` 只模拟一台台达伺服，不是实机扫描结果：
 
 ```sh
 python3 tools/esi_topology_audit.py build/esi_catalog.json test/fixtures/topology_delta_example.json
