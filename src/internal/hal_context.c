@@ -269,6 +269,9 @@ int32_t hal_context_start(HalContext* c, char* err, uint32_t len) {
     const int driver_rc = ethercat_init(&cfg);
     if (driver_rc != 0) {
         owner = NULL;
+        if (driver_rc == MASTER_DEVICE_DICTIONARY_ERROR)
+            return report(HAL_ERROR_CONFIG, err, len,
+                          "设备字典加载失败：检查 CNC_HAL_DEVICES_JSON 或安装目录中的 devices.json");
         return report(driver_rc == MASTER_START_TIMEOUT ? HAL_ERROR_TIMEOUT : HAL_ERROR_BUS,
                       err, len, "主站启动失败，驱动已回滚");
     }

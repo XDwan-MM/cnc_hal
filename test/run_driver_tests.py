@@ -19,7 +19,8 @@ OUT = options.output_dir.resolve() if options.output_dir else Path(tempfile.mkdt
 OUT.mkdir(parents=True, exist_ok=True)
 BUILD_ONLY = options.build_only
 ENV = dict(os.environ, ASAN_OPTIONS="detect_leaks=1:halt_on_error=1",
-           UBSAN_OPTIONS="halt_on_error=1:print_stacktrace=1")
+           UBSAN_OPTIONS="halt_on_error=1:print_stacktrace=1",
+           CNC_HAL_DEVICES_JSON=str(ROOT/"src/Greemaster/devices.json"))
 FLAGS = ["-g", "-O1", "-Wall", "-Wextra", "-Werror", "-fno-omit-frame-pointer",
          "-fno-pie", "-no-pie", "-fsanitize=address,undefined", "-fno-sanitize-recover=all",
          "-ffunction-sections", "-fdata-sections", "-Isrc", "-Isrc/Greemaster"]

@@ -7,6 +7,8 @@ set(CMAKE_C_EXTENSIONS ON)
 find_library(GREEMASTER_LIBRARY NAMES GREEMASTER PATHS /opt/GreeMaster/lib REQUIRED)
 find_library(XML2_LIBRARY NAMES xml2 PATHS /opt/GreeMaster/lib REQUIRED)
 find_package(Threads REQUIRED)
+include(GNUInstallDirs)
+set(HAL_INSTALLED_DEVICES_JSON "${CMAKE_INSTALL_FULL_DATADIR}/cnc_hal/devices.json")
 
 set(HAL_SOURCES
     src/internal/hal_config.c
@@ -25,6 +27,7 @@ target_include_directories(cnc_hal PUBLIC
     $<INSTALL_INTERFACE:include>
     PRIVATE src src/Greemaster)
 target_compile_options(cnc_hal PRIVATE -Wall -Wextra -Werror)
+target_compile_definitions(cnc_hal PRIVATE "DEVICES_JSON_PATH=\"${HAL_INSTALLED_DEVICES_JSON}\"")
 target_link_libraries(cnc_hal PRIVATE ${GREEMASTER_LIBRARY} ${XML2_LIBRARY} Threads::Threads m)
 target_link_options(cnc_hal PRIVATE
     "LINKER:--no-undefined"
@@ -40,17 +43,18 @@ if(HAL_BUILD_STATIC)
         $<INSTALL_INTERFACE:include>
         PRIVATE src src/Greemaster)
     target_compile_options(cnc_hal_static PRIVATE -Wall -Wextra -Werror)
+    target_compile_definitions(cnc_hal_static PRIVATE "DEVICES_JSON_PATH=\"${HAL_INSTALLED_DEVICES_JSON}\"")
     # 静态归档保留 SDK 等外部符号，由最终使用者链接这些依赖。
     target_link_libraries(cnc_hal_static PUBLIC ${GREEMASTER_LIBRARY} ${XML2_LIBRARY} Threads::Threads m)
     set_target_properties(cnc_hal_static PROPERTIES OUTPUT_NAME cnc_hal)
 endif()
 
-include(GNUInstallDirs)
 install(TARGETS cnc_hal LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
 if(HAL_BUILD_STATIC)
     install(TARGETS cnc_hal_static ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
 endif()
 install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR} FILES_MATCHING PATTERN "*.h")
+install(FILES src/Greemaster/devices.json DESTINATION ${CMAKE_INSTALL_DATADIR}/cnc_hal)
 
 include(CTest)
 option(HAL_BUILD_HARDWARE_TEST "Build the manually run hardware test program" OFF)

@@ -29,11 +29,13 @@ typedef struct {
 
 #define MASTER_STOP_REQUESTED (-28673)
 #define MASTER_START_TIMEOUT  (-28674)
+#define MASTER_DEVICE_DICTIONARY_ERROR (-28675)
 
-/* 设备字典路径。**开发期默认值**指向源码树那份，部署时必须 -D 覆盖。
- * 加载失败不致命——设备全判 UNKNOWN_TYPE，装配落空。 */
+/* 设备字典路径：优先使用 CNC_HAL_DEVICES_JSON 环境变量；未设置时使用
+ * 构建时指定的安装路径。直接编译源码而未指定默认路径时必须设置环境变量。
+ * 加载失败会阻止主站启动。 */
 #ifndef DEVICES_JSON_PATH
-#define DEVICES_JSON_PATH "/home/gree/mxh/cnc_hal-master/cnc_hal/src/Greemaster/devices.json"
+#define DEVICES_JSON_PATH NULL
 #endif
 
 /* =============== 开发期开关，上机前保持默认 =============== */

@@ -43,6 +43,7 @@ HAL 内部的主站驱动层。源码原本是封装侧的独立包（`DEMO_LIB_
 ## 二、启动流程（`ethercat_init()` 实测顺序）
 
 ```
+★ DevDict_Load(字典路径)              校验并加载字典；失败时不申请主站资源
 GM_Resource_Allocation            申请主站资源
 GM_Get_Version                    取主站版本
 Err_Fun_Register(err_call_back)   注册报错回调（出错时置 stop 标志）
@@ -51,8 +52,7 @@ GM_Master_Init                    主站初始化
 GM_Master_Start                   主站开始
 GM_Slave_Num_Get                  取从站数
 
-┌─ ★ DevDict_Load(DEVICES_JSON_PATH)   加载设备字典
-│  ★ get_device_info_from_eeprom()      逐台读 EEPROM：解析身份 → 查字典定类型
+┌─ ★ get_device_info_from_eeprom()      逐台读 EEPROM：解析身份 → 查字典定类型
 │                                        → 存进 g_slave_identity[]（后面要用）
 │  GM_Calculate_Config_Info()           算 PDO 映射 → slave_list
 │  ★ device_match()                    按类型装配，填 g_device_data[槽]
@@ -150,8 +150,17 @@ typedef struct {
 格力 axis6/axis4 是例外：多轴的对象号按轴偏移（`0x6041 + 2048*i`、PDO `0x1A00 + 16*i`），
 现有字典格式表达不了，所以留在 `servo_addr_axis6_config` / `axis4_config` 里。
 
-字典路径由 `DEVICES_JSON_PATH` 宏指定（默认指向源码树那份，**部署时要覆盖**）。
-**加载失败不致命**——清空旧字典、打警告、继续跑、所有设备判 UNKNOWN_TYPE（装配会全部落空）。
+字典路径优先取环境变量 `CNC_HAL_DEVICES_JSON`；未设置时取构建时的安装路径。
+CMake 会把 `devices.json` 安装到 `${CMAKE_INSTALL_DATADIR}/cnc_hal/devices.json`，
+并将对应绝对路径编入库。若安装目录被移动，须设置环境变量指向实际文件。
+直接编译源码而不经 CMake 时没有默认路径，也须设置该变量。
+路径为空、文件不存在或字典解析失败，会在申请任何主站资源之前终止启动，
+HAL 返回 `HAL_ERROR_CONFIG`；日志同时打印路径和解析原因。开发树内运行可用：
+
+```bash
+export CNC_HAL_DEVICES_JSON="$(pwd)/src/Greemaster/devices.json"
+```
+
 字典要求 version=1；拒绝非法数值、重复匹配键、未知字段与尾随垃圾。
 custom 伺服必须提供实际模式 mode_display，对象位宽及收发方向须匹配语义角色。
 

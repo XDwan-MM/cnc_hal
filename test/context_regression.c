@@ -25,7 +25,7 @@ void* __wrap_calloc(size_t n, size_t size) {
 
 int ethercat_init(const MasterConfig* cfg) {
     ++starts;
-    if (fail_init) return -1;
+    if (fail_init) return fail_init;
     received_config = *cfg;
     opened = 1;
     memset(slots, 0, sizeof(slots));
@@ -163,6 +163,10 @@ static void lifecycle(void) {
     CHECK(hal_axis_resolve(c, -1, &id) == HAL_ERROR_ARGUMENT && id == HAL_INVALID_ID);
     fail_init = 1;
     CHECK(hal_context_start(c, NULL, 0) == HAL_ERROR_BUS);
+    fail_init = MASTER_DEVICE_DICTIONARY_ERROR;
+    char dict_error[128];
+    CHECK(hal_context_start(c, dict_error, sizeof(dict_error)) == HAL_ERROR_CONFIG);
+    CHECK(strstr(dict_error, "CNC_HAL_DEVICES_JSON") != NULL);
     fail_init = 0;
     CHECK(hal_context_start(c, NULL, 0) == 0);
     CHECK(received_config.cycle_us == 1000 && received_config.cycle_timeout_ms == 2000);

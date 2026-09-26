@@ -275,6 +275,17 @@ static void lifecycle_tests(void) {
     config.cycle_timeout_ms = 5000;
     assert_closed();
     int before = sdk_calls;
+    const char* configured_path = getenv("CNC_HAL_DEVICES_JSON");
+    CHECK(configured_path && *configured_path);
+    char valid_path[4096];
+    CHECK(snprintf(valid_path, sizeof(valid_path), "%s", configured_path) < (int)sizeof(valid_path));
+    CHECK(setenv("CNC_HAL_DEVICES_JSON", "/nonexistent/cnc-hal-devices.json", 1) == 0);
+    CHECK(ethercat_init(&config) == MASTER_DEVICE_DICTIONARY_ERROR && sdk_calls == before);
+    assert_closed();
+    CHECK(setenv("CNC_HAL_DEVICES_JSON", "", 1) == 0);
+    CHECK(ethercat_init(&config) == MASTER_DEVICE_DICTIONARY_ERROR && sdk_calls == before);
+    assert_closed();
+    CHECK(setenv("CNC_HAL_DEVICES_JSON", valid_path, 1) == 0);
     CHECK(ethercat_init(NULL) < 0);
     MasterConfig invalid = config; invalid.cycle_us = 249;
     CHECK(ethercat_init(&invalid) < 0 && sdk_calls == before);

@@ -228,6 +228,27 @@ MASTER_API int ethercat_init(const MasterConfig* cfg) {
 
     error_module_init();
 
+    /* 在申请主站资源前确认字典可用，避免路径错误时仍将总线拉到 OP。 */
+    const char* dict_path = getenv("CNC_HAL_DEVICES_JSON");
+    if (!dict_path) dict_path = DEVICES_JSON_PATH;
+    if (!dict_path || !*dict_path) {
+        printf("错误：设备字典路径未配置；请设置 CNC_HAL_DEVICES_JSON\n");
+        exit_flag = 1;
+        return MASTER_DEVICE_DICTIONARY_ERROR;
+    }
+    char dict_error[192] = {0};
+    if (DevDict_Load(dict_path, dict_error, sizeof(dict_error)) != 0) {
+        printf("错误：设备字典加载失败（%s）：%s\n", dict_path, dict_error);
+        exit_flag = 1;
+        return MASTER_DEVICE_DICTIONARY_ERROR;
+    }
+    if (startup_expired()) {
+        DevDict_Unload();
+        exit_flag = 1;
+        return MASTER_START_TIMEOUT;
+    }
+    printf("设备字典已加载：%s（%d 条）\n", dict_path, DevDict_EntryCount());
+
     printf("================ 申请主站资源:GM_Resource_Allocation ==================\n");
     g_resources = 1;
     rc = GM_Resource_Allocation();
@@ -268,18 +289,6 @@ MASTER_API int ethercat_init(const MasterConfig* cfg) {
     else {
         printf("slave num is %d\n", slave_num);
     }
-    /* 设备字典：按 EEPROM 里的 厂商/产品/版本 定设备类型。
-     * 加载失败不致命——未命中的设备一律判 UNKNOWN_TYPE，仍会上报。 */
-    {
-        char dictErr[192] = {0};
-        if (DevDict_Load(DEVICES_JSON_PATH, dictErr, sizeof(dictErr)) != 0) {
-            printf("警告：设备字典加载失败（%s）—— 所有设备将判为 UNKNOWN_TYPE\n", dictErr);
-        }
-        else {
-            printf("设备字典已加载：%s（%d 条）\n", DEVICES_JSON_PATH, DevDict_EntryCount());
-        }
-    }
-
     if (startup_expired()) { rc = MASTER_START_TIMEOUT; goto err_close; }
     rc = get_device_info_from_eeprom(slave_num, types);
     CHECK_RC(rc, "读取或解析 EEPROM 失败", err_close);
