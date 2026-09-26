@@ -1,5 +1,7 @@
 # ESI 离线导入（首版）
 
+> 2026-09-27 复核：本工具链目前用于开发诊断，尚未进入启动授权。已确认审核漏查主轴目标速度、类型与重复映射，并未使用解析合成来源标记；`static_eligible` 不能作为准许运行的凭据。已知问题、实际进度和修复顺序见 [项目复核](review-2026-09-27.md)，下一步先修正数据证据契约。
+
 构建解析工具：
 
 ```sh
@@ -13,11 +15,11 @@ python3 tools/esi_catalog.py build /path/to/esi build/esi_catalog.json
 python3 tools/esi_catalog.py lookup build/esi_catalog.json 0x1dd 0x10305070 0x2040608
 ```
 
-`lookup` 的三个参数依次为主站扫描得到的 Vendor ID、Product Code、Revision，可用十进制或 `0x` 十六进制。索引按三元组精确匹配，不自动选用相邻修订版。同一身份有不同描述时导入失败；相同描述可保留多个来源。索引记录 ESI 路径和 SHA-256，重新导入时重新解析。XML 留在本地，不由运行中的主站下载。
+`lookup` 的三个参数依次为主站扫描得到的 Vendor ID、Product Code、Revision，可用十进制或 `0x` 十六进制。索引按三元组精确匹配，不自动选用相邻修订版。同一身份的已提取字段有差异时导入失败；相同描述可保留多个来源。未提取的限制差异尚不能检测。索引记录 ESI 路径和 SHA-256，重新导入时重新解析；查询不会检查原文件是否变更，目前也不保存解析器版本。XML 留在本地，不由运行中的主站下载。
 
 提取结果 `schema_version=1`，每个设备包含身份、SM、CoE 标志、Rx/Tx PDO 候选、对象和子索引、访问位、位宽、数据类型、DC 模式。`objects[].entries[].access` 沿用 KickCAT 的位定义：读 PreOP/SafeOP/OP 为 `1/2/4`，写 PreOP/SafeOP/OP 为 `8/16/32`，RxPDO/TxPDO 标志为 `64/128`。`coe=null` 表示 ESI 未声明 CoE 邮箱。
 
-**限制：**KickCAT 会从 PDO 声明补出对象字典条目及访问位，因此 `objects_may_be_synthesized=true`。这些位只供静态筛查，不能证明实际从站允许在线读写或重新映射。PDO 列表是 ESI 候选配置，不能证明当前 EEPROM/主站启用哪个 PDO。`pdo_config=true` 也不等于任意对象都能改映射。功能绑定还需要本项目的设备规则、默认映射和下发结果；当前导入工具尚未改变启动行为。
+**限制：**KickCAT 会从 PDO 声明补出对象字典条目、类型及访问位，还可能修正映射对象，故 `objects_may_be_synthesized=true`。目前没有逐字段来源，审核器也未检查该标记，不能将这些位直接当作明确的读写或重映射许可。PDO 列表是 ESI 候选配置；DC/SM/PDO 等约束尚未完整输出。功能绑定需要本项目的设备规则、完整计划和下发结果；当前导入工具尚未改变启动行为。
 
 离线回归：
 
@@ -25,7 +27,7 @@ python3 tools/esi_catalog.py lookup build/esi_catalog.json 0x1dd 0x10305070 0x20
 python3 test/test_esi_import.py build/esi_extract
 ```
 
-已用公开样本做过离线验证：
+历史公开样本解析冒烟记录（2026-09-26；对象数量包含解析器合成结果，不等于厂商显式对象数量）：
 
 | 厂商与型号 | 来源 | 解析结果 |
 | --- | --- | --- |
@@ -48,6 +50,8 @@ python3 test/test_esi_topology_audit.py
 
 有实机时，在启动进程设置 `CNC_HAL_TOPOLOGY_SNAPSHOT=/path/to/topology.json`，驱动在读取 EEPROM 后、下发配置前写出相同结构。它带有 `pre_download_pdo_entries`（含 PDO 索引及条目），来源是 EEPROM 解析结果，缺少 PDO 类别时可能来自 `GM_PDO_Map_Get()`；**它不是已启用映射的读回**。驱动此时不知道机床用途，`use` 为 `unassigned`，离线审核仍会保持 `pending`。可在快照副本中依据机床配置补上 `use=position` 或 `spindle` 后审核；不要把 `pre_download_pdo_entries` 改名为 `active_pdo_entries`。
 
-审核使用现有 `src/Greemaster/devices.json` 定义的 DS402 或自定义角色。普通伺服的必需角色与当前驱动一致；主轴另需 `actual_speed`。结果区分 `object_missing`、`subindex_missing`、`bits_mismatch`、`esi_mapping_unknown`、`esi_access_unknown`、`not_in_current_pdo` 和 `pdo_unverified`。可选角色缺失不会阻止其他角色；`alarm_control` 因尚无设备功能定义，固定为 `undefined_rule`，不会仅因出现 `0x6FFF` 就启用。格力多轴和 IO 当前为 `not_audited`，需要各自的设备规则。
+设置快照路径后，启动流程仍会继续下发和握手；该功能不是只扫描模式。写文件失败只输出错误并继续启动；扫描失败也可能留下上次文件。现阶段文件只用于诊断，不能作为自动启动授权缓存。
 
-该工具只输出离线审核报告，尚未接入 `ethercat_init()`；`static_eligible` 也仅表示所给快照与 ESI 一致，仍需主站下发成功及实机验证后才能发布运行能力。
+审核读取 `src/Greemaster/devices.json`，但 Python 的语法支持和角色表尚未与 C 读取器完全一致。当前普通 DS402 基础依赖相同；Python 对主轴只追加 `actual_speed`，而 C 实际要求 `actual_speed` 与 `target_speed`，此处为待修缺陷。结果区分 `object_missing`、`subindex_missing`、`bits_mismatch`、`esi_mapping_unknown`、`esi_access_unknown`、`not_in_current_pdo`、`pdo_unverified`、`pdo_pre_download` 和 `not_in_pre_download_pdo`。`object_missing` 仅说明提取结果未列出对象，不能证明设备无该对象。可选角色缺失不阻止报告中其他角色，但报告不会实际禁用运行函数；`alarm_control` 固定为 `undefined_rule`。格力多轴和 IO 当前为 `not_audited`。
+
+该工具只输出离线审核报告，尚未接入 `ethercat_init()`。现行 pending/active 快照判定是原型行为，不是目标启动契约。后续静态审核应对本次计划 PDO 作判断，下发成功、OP 和握手后再发布运行能力；不要求主站额外在线查字典或独立读回全部映射。

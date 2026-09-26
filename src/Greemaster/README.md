@@ -15,6 +15,7 @@ HAL 内部的主站驱动层。源码原本是封装侧的独立包（`DEMO_LIB_
 | `device.c/.h` | 读 EEPROM 定身份、查字典定类型、按类型装配 Entry 句柄 | 原有，类型识别改查字典、`servo_addr_config` 重写 |
 | `slave_list.c/.h` | PDO 映射链表（SM / PDO / Entry 三级） | 分配失败返回错误，支持局部链清理 |
 | `device_table.c/.h` | **按槽设备表** —— 本层对 HAL 的取数口 | 新增 |
+| `topology_snapshot.c/.h` | 启动期可选导出身份和下发前 PDO；只作诊断 | 新增，模拟 SDK 验证 |
 | `servo_step.c/.h` | DS402 推进一拍 + 预置目标位置 | 新增 |
 | `devices.json` | 设备字典数据 | 新增（由硬编码表转来） |
 | `export.h` | `MASTER_API` 导出标记 | 新增 |
@@ -24,7 +25,7 @@ HAL 内部的主站驱动层。源码原本是封装侧的独立包（`DEMO_LIB_
 ### 依赖方向：本层只依赖 `src/common/`
 
 ```
-              src/common/            ← 契约：纯定义 + 纯函数，无 IO，谁都不依赖
+              src/common/            ← 公共定义、DS402 纯函数及启动期字典读取
               ├── Ds402.h            DS402 编码 + 推进规则（纯函数，可离线穷举测试）
               └── devdict.c/.h       设备字典读取器（自包含 C99，无 cJSON）
                     ↑                          ↑
@@ -40,7 +41,9 @@ HAL 内部的主站驱动层。源码原本是封装侧的独立包（`DEMO_LIB_
 
 ---
 
-## 二、启动流程（`ethercat_init()` 实测顺序）
+## 二、启动流程（当前代码顺序，模拟 SDK 已覆盖）
+
+本轮 ESI 改造尚未用真实从站验收。ESI 索引与审核仍是独立工具，未进入下列启动链路；最新边界与下一步见 [项目复核](../../docs/review-2026-09-27.md)。
 
 ```
 ★ DevDict_Load(字典路径)              校验并加载字典；失败时不申请主站资源
@@ -54,6 +57,7 @@ GM_Slave_Num_Get                  取从站数
 
 ┌─ ★ get_device_info_from_eeprom()      逐台读 EEPROM：解析身份 → 查字典定类型
 │                                        → 存进 g_slave_identity[]（后面要用）
+│  [TopologySnapshot_Write()]           显式设置环境变量时导出下发前快照；不暂停启动
 │  GM_Calculate_Config_Info()           算 PDO 映射 → slave_list
 │  ★ device_match()                    按类型装配，填 g_device_data[槽]
 └─ ★ DeviceTable_Build(slave_num)      建按槽设备表
