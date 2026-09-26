@@ -17,6 +17,7 @@ set(HAL_SOURCES
     src/Greemaster/main_demo.c
     src/Greemaster/device.c
     src/Greemaster/device_table.c
+    src/Greemaster/topology_snapshot.c
     src/Greemaster/entry_access.c
     src/Greemaster/servo_step.c
     src/Greemaster/slave_list.c)

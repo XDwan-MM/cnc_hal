@@ -79,16 +79,16 @@ def object_roles(rule):
     return None
 
 
-def checked_entries(slave):
-    mapping = slave.get("active_pdo_entries")
+def checked_entries(slave, field):
+    mapping = slave.get(field)
     if mapping is None:
         return None
     if not isinstance(mapping, dict) or set(mapping) != {"rx", "tx"}:
-        raise ValueError("active_pdo_entries 必须同时含 rx 和 tx 数组")
+        raise ValueError(f"{field} 必须同时含 rx 和 tx 数组")
     out = {}
     for direction in ("rx", "tx"):
         if not isinstance(mapping[direction], list):
-            raise ValueError(f"active_pdo_entries.{direction} 必须是数组")
+            raise ValueError(f"{field}.{direction} 必须是数组")
         out[direction] = {
             (checked_int(e["index"], "index", 0xFFFF),
              checked_int(e.get("subindex", 0), "subindex", 0xFF),
@@ -97,7 +97,7 @@ def checked_entries(slave):
     return out
 
 
-def check_role(device, active, specification):
+def check_role(device, active, pre_download, specification):
     index, subindex, bits, direction = specification
     if direction not in ("rx", "tx"):
         raise ValueError(f"对象方向无效：{direction}")
@@ -117,6 +117,10 @@ def check_role(device, active, specification):
     if not any(entry["bits"] == bits and entry["access"] & operation_mask for entry in entries):
         return "esi_access_unknown", "ESI 未确认此方向可读写"
     if active is None:
+        if pre_download is not None:
+            if (index, subindex, bits) in pre_download[direction]:
+                return "pdo_pre_download", "条目在下发前方案中；尚未确认启用"
+            return "not_in_pre_download_pdo", "下发前方案中没有此条目"
         return "pdo_unverified", "尚无当前 PDO 条目快照"
     if (index, subindex, bits) not in active[direction]:
         return "not_in_current_pdo", "当前 PDO 中没有此条目"
@@ -161,14 +165,17 @@ def audit(catalog, topology, rules):
             if roles is None:
                 result["decision"] = "not_audited"
             else:
-                if slave.get("use") not in ("position", "spindle"):
-                    raise ValueError(f"从站 {pos} 伺服必须声明 use=position 或 spindle")
-                active = checked_entries(slave)
+                use = slave.get("use", "unassigned")
+                if use not in ("position", "spindle", "unassigned"):
+                    raise ValueError(f"从站 {pos} 的 use 无效")
+                active = checked_entries(slave, "active_pdo_entries")
+                pre_download = checked_entries(slave, "pre_download_pdo_entries")
                 required = set(REQUIRED)
-                if slave.get("use") == "spindle":
+                if use == "spindle":
                     required.add("actual_speed")
                 for name, specification in roles.items():
-                    state, reason = check_role(item["device"], active, specification)
+                    state, reason = check_role(item["device"], active, pre_download,
+                                               specification)
                     result["roles"][name] = {"required": name in required,
                                               "state": state, "reason": reason,
                                               "object": {"index": specification[0],
@@ -183,6 +190,8 @@ def audit(catalog, topology, rules):
                                    "not_in_current_pdo") for state in required_states):
                     result["decision"] = "blocked"
                 elif any(state != "static_ok" for state in required_states):
+                    result["decision"] = "pending"
+                elif use == "unassigned":
                     result["decision"] = "pending"
                 else:
                     result["decision"] = "static_eligible"

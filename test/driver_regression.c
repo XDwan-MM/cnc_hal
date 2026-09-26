@@ -257,7 +257,22 @@ static void assert_closed(void) {
 static void lifecycle_tests(void) {
     actual_eeprom_length = -1;
     advance_start_ms = 2001;
+    char snapshot_path[] = "/tmp/cnc-hal-topology-XXXXXX";
+    int snapshot_fd = mkstemp(snapshot_path);
+    CHECK(snapshot_fd >= 0 && close(snapshot_fd) == 0);
+    CHECK(setenv("CNC_HAL_TOPOLOGY_SNAPSHOT", snapshot_path, 1) == 0);
     CHECK(ethercat_init(&config) == 0);
+    CHECK(unsetenv("CNC_HAL_TOPOLOGY_SNAPSHOT") == 0);
+    FILE* snapshot = fopen(snapshot_path, "r");
+    CHECK(snapshot != NULL);
+    char snapshot_text[4096];
+    const size_t snapshot_len = fread(snapshot_text, 1, sizeof(snapshot_text) - 1, snapshot);
+    snapshot_text[snapshot_len] = '\0';
+    CHECK(fclose(snapshot) == 0 && unlink(snapshot_path) == 0);
+    CHECK(strstr(snapshot_text, "\"vendor_id\":441") != NULL);
+    CHECK(strstr(snapshot_text, "\"pre_download_pdo_entries\"") != NULL);
+    CHECK(strstr(snapshot_text, "\"index\":24640") != NULL);
+    CHECK(strstr(snapshot_text, "\"active_pdo_entries\"") == NULL);
     CHECK(start_seconds == 120 && active_seconds == 118 && op_seconds == 118);
     CHECK(Master_WaitCycle() == 0 && sync_seconds == 5);
     stop_during_wait = 1;

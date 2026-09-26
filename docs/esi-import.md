@@ -44,7 +44,9 @@ python3 tools/esi_topology_audit.py build/esi_catalog.json test/fixtures/topolog
 python3 test/test_esi_topology_audit.py
 ```
 
-拓扑快照每个从站必须给出 `slave_pos`、`vendor_id`、`product_code`、`revision`；伺服还需给出 `use`（`position` 或 `spindle`）。若取得**当前实际启用**的 PDO 条目，再给出 `active_pdo_entries`，其中 `rx` 和 `tx` 分别是 `{index, subindex, bits}` 数组。不能把 ESI 候选 PDO 列表填进这个字段。缺省时审核结果是 `pending/pdo_unverified`，不会宣告功能已就绪。
+拓扑快照每个从站必须给出 `slave_pos`、`vendor_id`、`product_code`、`revision`；伺服用途 `use` 可为 `position`、`spindle` 或尚未分配的 `unassigned`。若取得**当前实际启用**的 PDO 条目，再给出 `active_pdo_entries`，其中 `rx` 和 `tx` 分别是 `{index, subindex, bits}` 数组。不能把 ESI 候选 PDO 列表填进这个字段。缺省时审核结果是 `pending/pdo_unverified`，不会宣告功能已就绪。
+
+有实机时，在启动进程设置 `CNC_HAL_TOPOLOGY_SNAPSHOT=/path/to/topology.json`，驱动在读取 EEPROM 后、下发配置前写出相同结构。它带有 `pre_download_pdo_entries`（含 PDO 索引及条目），来源是 EEPROM 解析结果，缺少 PDO 类别时可能来自 `GM_PDO_Map_Get()`；**它不是已启用映射的读回**。驱动此时不知道机床用途，`use` 为 `unassigned`，离线审核仍会保持 `pending`。可在快照副本中依据机床配置补上 `use=position` 或 `spindle` 后审核；不要把 `pre_download_pdo_entries` 改名为 `active_pdo_entries`。
 
 审核使用现有 `src/Greemaster/devices.json` 定义的 DS402 或自定义角色。普通伺服的必需角色与当前驱动一致；主轴另需 `actual_speed`。结果区分 `object_missing`、`subindex_missing`、`bits_mismatch`、`esi_mapping_unknown`、`esi_access_unknown`、`not_in_current_pdo` 和 `pdo_unverified`。可选角色缺失不会阻止其他角色；`alarm_control` 因尚无设备功能定义，固定为 `undefined_rule`，不会仅因出现 `0x6FFF` 就启用。格力多轴和 IO 当前为 `not_audited`，需要各自的设备规则。
 

@@ -61,7 +61,8 @@ if not BUILD_ONLY:
 
 driver = build("driver_regression", ["test/driver_regression.c",
     "src/Greemaster/main_demo.c", "src/Greemaster/slave_list.c", "src/Greemaster/servo_step.c",
-    "src/Greemaster/entry_access.c", "src/Greemaster/device_table.c", "src/common/devdict.c"],
+    "src/Greemaster/entry_access.c", "src/Greemaster/device_table.c",
+    "src/Greemaster/topology_snapshot.c", "src/common/devdict.c"],
     extra=["-Wno-unused-parameter", "-Wl,--wrap=calloc", "-Wl,--wrap=clock_gettime"])
 if not BUILD_ONLY:
     print(run("driver_regression", [driver]).strip().splitlines()[-1])

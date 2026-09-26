@@ -49,6 +49,22 @@ class AuditTests(unittest.TestCase):
         self.assertEqual(result["decision"], "pending")
         self.assertEqual(result["roles"]["control_word"]["state"], "pdo_unverified")
 
+    def test_pre_download_map_never_marks_ready(self):
+        catalog, topology = fixture()
+        entries = topology["slaves"][0].pop("active_pdo_entries")
+        topology["slaves"][0]["pre_download_pdo_entries"] = entries
+        result = self.result(catalog, topology)
+        self.assertEqual(result["decision"], "pending")
+        self.assertEqual(result["roles"]["control_word"]["state"], "pdo_pre_download")
+        entries["rx"] = [e for e in entries["rx"] if e["index"] != 0x6040]
+        result = self.result(catalog, topology)
+        self.assertEqual(result["roles"]["control_word"]["state"],
+                         "not_in_pre_download_pdo")
+
+        topology["slaves"][0]["active_pdo_entries"] = fixture()[1]["slaves"][0]["active_pdo_entries"]
+        topology["slaves"][0]["use"] = "unassigned"
+        self.assertEqual(self.result(catalog, topology)["decision"], "pending")
+
     def test_missing_required_and_optional(self):
         catalog, topology = fixture()
         topology["slaves"][0]["active_pdo_entries"]["rx"] = [

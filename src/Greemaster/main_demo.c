@@ -3,6 +3,7 @@
 #include "common/devdict.h"
 #include "device_table.h"
 #include "servo_step.h"
+#include "topology_snapshot.h"
 #include <stdatomic.h>
 #include <time.h>
 #ifdef __DeveloperMode__
@@ -296,6 +297,22 @@ MASTER_API int ethercat_init(const MasterConfig* cfg) {
     if (startup_expired()) { rc = MASTER_START_TIMEOUT; goto err_close; }
     rc = get_device_info_from_eeprom(slave_num, types);
     CHECK_RC(rc, "读取或解析 EEPROM 失败", err_close);
+
+    /* 仅在显式指定路径时输出诊断快照；它是下发前方案，不是已启用映射。 */
+    const char* snapshot_path = getenv("CNC_HAL_TOPOLOGY_SNAPSHOT");
+    if (snapshot_path && *snapshot_path) {
+        FILE* snapshot = fopen(snapshot_path, "w");
+        if (!snapshot) {
+            fprintf(stderr, "拓扑快照无法打开：%s\n", snapshot_path);
+        } else {
+            const int written = TopologySnapshot_Write(snapshot, slave_num, slave_list);
+            const int closed = fclose(snapshot);
+            if (written != 0 || closed != 0) {
+                remove(snapshot_path);
+                fprintf(stderr, "拓扑快照写入失败：%s\n", snapshot_path);
+            }
+        }
+    }
 
     // 计算PDO映射
     printf("=============== 计算PDO映射:GM_Calculate_Config_Info ==================\n");
