@@ -137,6 +137,8 @@ cases.append("-"+str(OUT/"missing.json"))
 dictionary=build("dictionary_regression",["test/dictionary_regression.c","src/common/devdict.c"], extra=["-Wl,--wrap=malloc"])
 if not BUILD_ONLY:
     print(run("dictionary_regression",[dictionary,ROOT/"src/Greemaster/devices.json",*cases]).strip())
+    run("esi_topology_audit", ["python3", "-B", "test/test_esi_topology_audit.py"])
+    print("ESI topology audit regression passed")
     print("ASan/UBSan and leak checks passed. Logs:", OUT)
 else:
     print("Test executables compiled without running. Output:", OUT)

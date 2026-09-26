@@ -34,3 +34,18 @@ python3 test/test_esi_import.py build/esi_extract
 | 台达 ASDA2-E | [公开 GitHub ESI 样本](https://github.com/nicola-sysdesign/asda-test/blob/main/Delta_ASDA2-E_rev4-00_XML_TSE_20160620.xml) | 1 个设备版本，580 个字典对象，4 个 RxPDO、4 个 TxPDO |
 
 这些厂商文件只在临时目录用于验证，未纳入仓库。三菱的 [MR-J5 ESI 官方下载页](https://www.mitsubishielectric.co.jp/fa/download/software/detailsearch.page?infostatus=5_1_2&kisyu=%2Fservo&lang=2&mode=software&select=0&shiryoid=0000000040&softid=3&viewradio=0) 已定位，尚未取得文件验证。
+
+## 无从站时的拓扑审核
+
+用与 EEPROM 扫描相同的有序身份数据制作拓扑快照。可先用 `test/fixtures/topology_delta_example.json` 演练；它只模拟一台台达伺服，不是实机扫描结果。将上面的台达 ESI 放入导入目录后运行：
+
+```sh
+python3 tools/esi_topology_audit.py build/esi_catalog.json test/fixtures/topology_delta_example.json
+python3 test/test_esi_topology_audit.py
+```
+
+拓扑快照每个从站必须给出 `slave_pos`、`vendor_id`、`product_code`、`revision`；伺服还需给出 `use`（`position` 或 `spindle`）。若取得**当前实际启用**的 PDO 条目，再给出 `active_pdo_entries`，其中 `rx` 和 `tx` 分别是 `{index, subindex, bits}` 数组。不能把 ESI 候选 PDO 列表填进这个字段。缺省时审核结果是 `pending/pdo_unverified`，不会宣告功能已就绪。
+
+审核使用现有 `src/Greemaster/devices.json` 定义的 DS402 或自定义角色。普通伺服的必需角色与当前驱动一致；主轴另需 `actual_speed`。结果区分 `object_missing`、`subindex_missing`、`bits_mismatch`、`esi_mapping_unknown`、`esi_access_unknown`、`not_in_current_pdo` 和 `pdo_unverified`。可选角色缺失不会阻止其他角色；`alarm_control` 因尚无设备功能定义，固定为 `undefined_rule`，不会仅因出现 `0x6FFF` 就启用。格力多轴和 IO 当前为 `not_audited`，需要各自的设备规则。
+
+该工具只输出离线审核报告，尚未接入 `ethercat_init()`；`static_eligible` 也仅表示所给快照与 ESI 一致，仍需主站下发成功及实机验证后才能发布运行能力。

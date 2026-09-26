@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "slaves": [
+    {
+      "slave_pos": 0,
+      "vendor_id": 477,
+      "product_code": 271601776,
+      "revision": 33818120,
+      "use": "position"
+    }
+  ]
+}
