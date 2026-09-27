@@ -1,7 +1,7 @@
 # P0：GreeMaster / FPGA 能力核查
 
 - 日期：2026-09-26
-- 复核更新：2026-09-27。SDK 边界保留；代码现状按 `e84771f` 修订，整体计划见 [项目复核](review-2026-09-27.md)。
+- 复核更新：2026-09-27。SDK 边界及未实测项保留；当前阶段见 [实施计划](esi-capability-plan.md)。
 - 结论状态：P0 方案核查完成；目标硬件实测纳入 P4
 - 本机 SDK：`/opt/GreeMaster/lib/libGREEMASTER.so.1.1.8`
 - 头文件版本：`_FULL_VERSION_ = "1.1.8"`，`_API_VERSION_ = 8`，`_BUILD_COUNT_ = 93`，构建日期 2026-09-24（见 `/opt/GreeMaster/include/libGREEMASTER/version.h`）
@@ -68,7 +68,7 @@ H1–H6 均待实机执行。本 WSL 环境只有 `eth0`、`lo`，未发现 FPGA
 2. P2 从 ESI 和经验证的设备规则获取对象与映射约束。SDK 作者确认 PREOP 普通 SDO 不可用，也没有对象元数据查询接口；首次启动不能依赖在线查词典。
 3. P3 依据 ESI / 设备规则规划并下发配置，以整体下发成功和 OP 作为运行门槛。`GM_PDO_Map_Print()` 不验证实际映射，`GM_PDO_Map_Get()` 来源未确认前也不作为生效证据；逐项读回作为后续工程诊断，不阻断 P1/P2。
 4. 当前 `read_sdo_index()` / `write_sdo_index()` 对发送返回值、错误状态和超时的处理较弱，且注释中的普通请求最大数据 4 字节；P1/P3 若使用 SDO，应建立串行请求与明确的失败返回。
-5. P1 已移除 `COERequestResult()` 无条件补对象，并调整 `servo_addr_config()` 必需/可选角色及 `sample_axis()` 可选采样。用途依赖仍未移到下发前：例如主轴速度完整性在 HAL 层、主站启动后才检查。离线审核也尚未与运行规则完全一致。
+5. P1 已移除 `COERequestResult()` 无条件补对象，并调整 `servo_addr_config()` 必需/可选角色及 `sample_axis()` 可选采样。N2 离线审核与 C 共用基础及速度依赖，并要求主轴同时具备实际速度和目标速度；用途依赖仍未进入主站下发前，须由 N3 完成。
 6. 当前 SDK API 只见有序从站数量与位置读取路径。若业务要求实际端口连接图，应获得 SDK 新接口或 FPGA 支持后再纳入验收。`GM_Config_Download_And_Active()` 失败后，SDK 作者确认主站停滞，必须关闭并重新初始化；同一次启动中不能去掉可选项后重试。
 
 ## 5. 现有报警路径与配置策略
