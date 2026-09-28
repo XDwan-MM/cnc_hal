@@ -4,6 +4,7 @@
 #include "hal_c_api.h"
 #include "Greemaster/main_demo.h"
 #include "Greemaster/device_table.h"
+#include "Greemaster/device.h"
 #include "Greemaster/servo_step.h"
 #include "Greemaster/entry_access.h"
 #include <math.h>
@@ -22,6 +23,8 @@ typedef struct {
     int sampled;       /* 本 context 内是否采过样：决定 counts 取初值还是取增量 */
     int mode;          /* 驱动器回报的当前模式（0x6061）；-1 = 还没采到 */
     int desired_mode;  /* HAL 要求驱动器处在的模式（CSP/CSV），每拍传给状态机 */
+    int has_speed;     /* 0x606C 和 0x60FF 同时绑定 */
+    int has_error;     /* 0x603F 已绑定 */
 
     Ds402Request request;  /* 推进方向。每拍都要传，直到状态字显示已达成为止 */
 
@@ -70,6 +73,8 @@ struct HalContext {
     int fault;                  /* 粘性总线错误码，gate 会一直返回它，直到 stop/start */
     int axis_count;             /* 轴 + 主轴总数；HalAxisId 就在这个下标空间里 */
     int io_count;               /* IO + 面板总数 */
+    int slave_count;
+    HalCSlaveInfo slaves[HAL_C_MAX_DEV];
     uint32_t x_size, y_size;    /* 输入/输出映像所需字节数 = 各段末尾的最大值 */
     Axis axes[HAL_C_MAX_DEV];   /* 前 axis_count 个有效 */
     Io   ios[HAL_C_MAX_DEV];    /* 前 io_count 个有效 */
@@ -151,6 +156,14 @@ static int bind_axis(Axis* a, const DeviceSlot* slots, int count) {
         if (s->slave_pos != a->cfg.slave_pos || s->axis_index != a->cfg.axis_index) continue;
         if (s->type != SERVO_TYPE && s->type != GREE_AXIS6_TYPE && s->type != GREE_AXIS4_TYPE) continue;
         a->slot = i;
+        const slave_addr* h = &s->entries.slave;
+        if (h->statusWord.bit_length != 16 || h->act_pos.bit_length != 32 ||
+            h->act_mode.bit_length != 8 || h->Control_word.bit_length != 16 ||
+            h->target_pos.bit_length != 32 || h->Modes_of_operation.bit_length != 8)
+            return HAL_ERROR_UNSUPPORTED;
+        a->has_speed = h->act_speed.bit_length == 32 && h->target_speed.bit_length == 32;
+        a->has_error = h->error_code.bit_length == 16;
+        if (a->spindle && !a->has_speed) return HAL_ERROR_UNSUPPORTED;
         a->identity.type = s->type;
         a->identity.vendor_id = s->vendor_id;
         a->identity.product_code = s->product_code;
@@ -211,6 +224,8 @@ static void reset_runtime(HalContext* c) {
     c->running = c->phase = c->sampled = c->fault = 0;
     c->axis_count = c->config.axis_count + c->config.spindle_count;
     c->io_count = c->config.io_count + c->config.panel_count;
+    c->slave_count = 0;
+    memset(c->slaves, 0, sizeof(c->slaves));
     c->x_size = c->y_size = 0;
     memset(c->axes, 0, sizeof(c->axes));
     memset(c->ios, 0, sizeof(c->ios));
@@ -269,17 +284,63 @@ int32_t hal_context_start(HalContext* c, char* err, uint32_t len) {
     const int driver_rc = ethercat_init(&cfg);
     if (driver_rc != 0) {
         owner = NULL;
+        if (driver_rc == MASTER_DEVICE_DICTIONARY_ERROR)
+            return report(HAL_ERROR_CONFIG, err, len,
+                          "设备字典加载失败：检查 CNC_HAL_DEVICES_JSON 或安装目录中的 devices.json");
+        const char* startup_error = Master_StartupError();
         return report(driver_rc == MASTER_START_TIMEOUT ? HAL_ERROR_TIMEOUT : HAL_ERROR_BUS,
-                      err, len, "主站启动失败，驱动已回滚");
+                      err, len, startup_error && startup_error[0] ? startup_error : "主站启动失败，驱动已回滚");
     }
     const DeviceSlot* slots = NULL;
     const int n = DeviceTable_Get(&slots);
     int result = HAL_ERROR_CONFIG;
     const char* detail = "设备表无效";
+    char bind_detail[160];
     if (n < 0 || n > MAX_DEVICE_NUM || (n && !slots)) goto bad;
+    c->slave_count = Master_SlaveCount();
+    detail = "从站数量无效";
+    if (c->slave_count < 0 || c->slave_count > (int)HAL_C_MAX_DEV) goto bad;
+    for (int pos = 0; pos < c->slave_count; ++pos) {
+        HalCSlaveInfo* dst = &c->slaves[pos];
+        const DEVICE_BASIC_INFO* src = device_identity_get(pos);
+        dst->slave_pos = pos;
+        dst->identity.type = UNKNOWN_TYPE;
+        dst->identity.vendor_id = src->ID;
+        dst->identity.product_code = src->CODE;
+        dst->identity.revision = src->Revision;
+        dst->identity.serial = src->Serial;
+        DeviceSlot hash_slot = {0};
+        hash_slot.vendor_id = src->ID;
+        hash_slot.product_code = src->CODE;
+        hash_slot.revision = src->Revision;
+        dst->identity.device_id = src->Serial ? src->Serial : identity_hash(&hash_slot);
+        for (int prev = 0; prev < pos; ++prev)
+            if (c->slaves[prev].identity.vendor_id == src->ID &&
+                c->slaves[prev].identity.product_code == src->CODE)
+                ++dst->identity.family_index;
+        for (int slot = 0; slot < n; ++slot) {
+            if (slots[slot].slave_pos != pos) continue;
+            dst->identity.type = slots[slot].type;
+            if (slots[slot].axis_index >= 0) ++dst->axis_count;
+            if (!dst->identity.name[0])
+                snprintf(dst->identity.name, sizeof(dst->identity.name), "%s", slots[slot].name);
+        }
+    }
     detail = "配置物理轴未找到或类型不匹配";
-    for (int i = 0; i < c->axis_count; ++i)
-        if (bind_axis(&c->axes[i], slots, n)) goto bad;
+    for (int i = 0; i < c->axis_count; ++i) {
+        const int bind_rc = bind_axis(&c->axes[i], slots, n);
+        if (bind_rc) {
+            const Axis* a = &c->axes[i];
+            if (a->slot >= 0) {
+                snprintf(bind_detail, sizeof(bind_detail),
+                         "从站 %d 轴 %d 缺少%s必需 PDO 功能",
+                         a->cfg.slave_pos, a->cfg.axis_index,
+                         a->spindle && !a->has_speed ? "主轴速度" : "DS402 控制");
+                detail = bind_detail;
+            }
+            goto bad;
+        }
+    }
     for (int i = 0; i < c->io_count; ++i) {
         const int panel = i >= c->config.io_count;
         const int j = panel ? i - c->config.io_count : i;
@@ -359,6 +420,56 @@ int32_t hal_device_identity(const HalContext* c, HalAxisId id, HalCIdentity* out
     return HAL_OK;
 }
 
+int32_t hal_axis_capability(const HalContext* c, HalAxisId id, uint32_t function,
+                            HalCCapability* out) {
+    if (!c || !out || function < HAL_FUNC_POSITION || function > HAL_FUNC_ERROR_CODE)
+        return HAL_ERROR_ARGUMENT;
+    const Axis* a = find_axis(c, id);
+    if (!a) return HAL_ERROR_ARGUMENT;
+    if (!c->running) return HAL_ERROR_NOT_RUNNING;
+    memset(out, 0, sizeof(*out));
+    out->function = function;
+    out->slave_pos = a->cfg.slave_pos;
+    out->axis_index = a->cfg.axis_index;
+    out->state = HAL_CAP_READY;
+    if (function == HAL_FUNC_SPEED && !a->has_speed) {
+        out->state = HAL_CAP_UNSUPPORTED;
+        snprintf(out->reason, sizeof(out->reason), "缺少实际速度或目标速度 PDO");
+    } else if (function == HAL_FUNC_ERROR_CODE && !a->has_error) {
+        out->state = HAL_CAP_UNSUPPORTED;
+        snprintf(out->reason, sizeof(out->reason), "缺少故障码 PDO");
+    }
+    return HAL_OK;
+}
+
+int32_t hal_slave_count(const HalContext* c) {
+    if (!c) return -HAL_ERROR_ARGUMENT;
+    return c->running ? c->slave_count : -HAL_ERROR_NOT_RUNNING;
+}
+
+int32_t hal_slave_info(const HalContext* c, int32_t slave_pos, HalCSlaveInfo* out) {
+    if (!c || !out || slave_pos < 0) return HAL_ERROR_ARGUMENT;
+    if (!c->running) return HAL_ERROR_NOT_RUNNING;
+    if (slave_pos >= c->slave_count) return HAL_ERROR_ARGUMENT;
+    *out = c->slaves[slave_pos];
+    return HAL_OK;
+}
+
+int32_t hal_slave_capability(const HalContext* c, int32_t slave_pos, uint32_t function,
+                             HalCCapability* out) {
+    if (!c || !out || slave_pos < 0 || function != HAL_FUNC_ALARM_CONTROL)
+        return HAL_ERROR_ARGUMENT;
+    if (!c->running) return HAL_ERROR_NOT_RUNNING;
+    if (slave_pos >= c->slave_count) return HAL_ERROR_ARGUMENT;
+    memset(out, 0, sizeof(*out));
+    out->function = function;
+    out->state = HAL_CAP_NOT_CONFIGURED;
+    out->slave_pos = slave_pos;
+    out->axis_index = -1;
+    snprintf(out->reason, sizeof(out->reason), "设备未定义报警控制功能");
+    return HAL_OK;
+}
+
 /* 周期第一拍，也是唯一的阻塞点。phase 必须为 0（上一拍已 commit）。 */
 int32_t hal_rt_wait_cycle(HalContext* c) {
     int rc = gate(c); if (rc) return rc;
@@ -374,12 +485,13 @@ int32_t hal_rt_wait_cycle(HalContext* c) {
  * 线性反馈按 32 位回绕累计，模反馈按每转脉冲数取最短差值，两者都要求相邻采样
  * 位移小于半个计数周期——否则丢掉的整转从单个模计数里认不出来。任一读失败即总线故障。 */
 static int sample_axis(Axis* a) {
-    uint32_t raw, sw, mode, error, velocity; // 实际位置 状态字 当前运行模式 错误码 实际速度
+    uint32_t raw, sw, mode, error = 0, velocity = 0;
     if (Master_ServoRead(a->slot, DEV_DICT_ROLE_ACTUAL_POS, &raw) ||
         Master_ServoRead(a->slot, DEV_DICT_ROLE_STATUS_WORD, &sw) ||
         Master_ServoRead(a->slot, DEV_DICT_ROLE_MODE_DISPLAY, &mode) ||
-        Master_ServoRead(a->slot, DEV_DICT_ROLE_ERROR_CODE, &error) ||
-        Master_ServoRead(a->slot, DEV_DICT_ROLE_ACTUAL_SPEED, &velocity)) return HAL_ERROR_BUS;
+        (a->has_error && Master_ServoRead(a->slot, DEV_DICT_ROLE_ERROR_CODE, &error)) ||
+        (a->has_speed && Master_ServoRead(a->slot, DEV_DICT_ROLE_ACTUAL_SPEED, &velocity)))
+        return HAL_ERROR_BUS;
     if (!a->sampled) a->counts = signed32(raw);
     else {
         double delta = signed32(raw - a->raw_pos);
@@ -393,6 +505,7 @@ static int sample_axis(Axis* a) {
     a->status.actual_pos = a->counts * feedback_scale(a) + a->feedback_offset;
     a->status.raw_status = (uint16_t)sw;
     a->status.error_code = (uint16_t)error;
+    a->status.error_code_valid = a->has_error;
     a->status.enabled = (sw & DS402_SW_MASK_OP_ENABLED) == DS402_SW_VAL_OP_ENABLED;
     a->status.position_valid = 1;
     if (!a->sampled) a->status.command_pos = a->status.actual_pos;
@@ -402,7 +515,7 @@ static int sample_axis(Axis* a) {
     a->speed.enabled = a->status.enabled;
     a->speed.raw_status = (uint16_t)sw;
     a->speed.position_deg = a->status.actual_pos;
-    a->speed.actual_speed = signed32(velocity) * feedback_scale(a) / 6.0;
+    a->speed.actual_speed = a->has_speed ? signed32(velocity) * feedback_scale(a) / 6.0 : 0;
     if (!isfinite(a->status.actual_pos) || !isfinite(a->speed.actual_speed)) return HAL_ERROR_BUS;
     a->speed.at_speed = a->spindle && a->status.enabled && mode == DS402_MODE_CSV &&
         fabs(a->speed.actual_speed - a->speed.command_speed) <= a->spindle_cfg.speed_window;
@@ -418,7 +531,7 @@ int32_t hal_rt_begin_cycle(HalContext* c) {
     for (int i = 0; i < c->axis_count; ++i) {
         Axis* a = &c->axes[i];
         if (sample_axis(a)) return bus_error(c);
-        if (a->zero_speed) {
+        if (a->zero_speed && a->has_speed) {
             if (Master_ServoWrite(a->slot, DEV_DICT_ROLE_TARGET_SPEED, 0)) return bus_error(c);
             a->zero_speed = 0;
         }
@@ -461,7 +574,7 @@ int32_t hal_rt_commit_cycle(HalContext* c) {
     for (int i = 0; i < c->axis_count; ++i) {
         Axis* a = &c->axes[i];
         /* 急停可在 begin 后到达；提交前覆盖本拍旧控制字和速度目标。 */
-        if (a->zero_speed || a->stop_override) {
+        if ((a->zero_speed || a->stop_override) && a->has_speed) {
             if (Master_ServoWrite(a->slot, DEV_DICT_ROLE_TARGET_SPEED, 0)) return bus_error(c);
             a->zero_speed = 0;
         }

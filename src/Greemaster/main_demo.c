@@ -39,15 +39,18 @@ static uint32_t startup_seconds_left(void) {
 /* 每个阶段共用一个截止时间；不可中断的 SDK 调用只能返回后检测超时。 */
 #undef CHECK_RC
 #define CHECK_RC(value, message, label) do { \
-    if ((value) != 0) goto label; \
-    if (startup_expired()) { rc = MASTER_START_TIMEOUT; goto label; } \
+    if ((value) != 0) { snprintf(g_start_error, sizeof(g_start_error), "%s (rc=%d)", message, (int)(value)); goto label; } \
+    if (startup_expired()) { rc = MASTER_START_TIMEOUT; snprintf(g_start_error, sizeof(g_start_error), "启动总预算已耗尽"); goto label; } \
 } while (0)
 int slave_num = 0;
+static char g_start_error[192];
+const char* Master_StartupError(void) { return g_start_error; }
 
 /* ethercat_init() 存下的配置。周期原语（Master_WaitCycle）要用 cycle_timeout_ms，
  * 而那些函数没有入参——配置在启动时定一次，之后不变。 */
 static MasterConfig g_cfg;
 static int g_resources, g_master_initialized, g_io_resources, g_ready;
+int Master_SlaveCount(void) { return g_ready ? slave_num : 0; }
 device_data_t g_device_data[MAX_DEVICE_NUM] = { 0 };  // 假设最多 30 个设备
 // ================打断函数=================
 // 原 sigint_handler() 已删除：库不该装 SIGINT 处理器，会覆盖宿主程序自己的。
@@ -215,6 +218,7 @@ MASTER_API int ethercat_init(const MasterConfig* cfg) {
         return -1;
     }
     g_cfg = *cfg;
+    g_start_error[0] = '\0';
     const uint64_t now = monotonic_ms();
     if (now == UINT64_MAX) return -1;
     start_deadline_ms = now + cfg->start_timeout_ms;
@@ -227,6 +231,27 @@ MASTER_API int ethercat_init(const MasterConfig* cfg) {
     memset(&g_last_warn, 0, sizeof(g_last_warn));
 
     error_module_init();
+
+    /* 在申请主站资源前确认字典可用，避免路径错误时仍将总线拉到 OP。 */
+    const char* dict_path = getenv("CNC_HAL_DEVICES_JSON");
+    if (!dict_path) dict_path = DEVICES_JSON_PATH;
+    if (!dict_path || !*dict_path) {
+        printf("错误：设备字典路径未配置；请设置 CNC_HAL_DEVICES_JSON\n");
+        exit_flag = 1;
+        return MASTER_DEVICE_DICTIONARY_ERROR;
+    }
+    char dict_error[192] = {0};
+    if (DevDict_Load(dict_path, dict_error, sizeof(dict_error)) != 0) {
+        printf("错误：设备字典加载失败（%s）：%s\n", dict_path, dict_error);
+        exit_flag = 1;
+        return MASTER_DEVICE_DICTIONARY_ERROR;
+    }
+    if (startup_expired()) {
+        DevDict_Unload();
+        exit_flag = 1;
+        return MASTER_START_TIMEOUT;
+    }
+    printf("设备字典已加载：%s（%d 条）\n", dict_path, DevDict_EntryCount());
 
     printf("================ 申请主站资源:GM_Resource_Allocation ==================\n");
     g_resources = 1;
@@ -268,18 +293,6 @@ MASTER_API int ethercat_init(const MasterConfig* cfg) {
     else {
         printf("slave num is %d\n", slave_num);
     }
-    /* 设备字典：按 EEPROM 里的 厂商/产品/版本 定设备类型。
-     * 加载失败不致命——未命中的设备一律判 UNKNOWN_TYPE，仍会上报。 */
-    {
-        char dictErr[192] = {0};
-        if (DevDict_Load(DEVICES_JSON_PATH, dictErr, sizeof(dictErr)) != 0) {
-            printf("警告：设备字典加载失败（%s）—— 所有设备将判为 UNKNOWN_TYPE\n", dictErr);
-        }
-        else {
-            printf("设备字典已加载：%s（%d 条）\n", DEVICES_JSON_PATH, DevDict_EntryCount());
-        }
-    }
-
     if (startup_expired()) { rc = MASTER_START_TIMEOUT; goto err_close; }
     rc = get_device_info_from_eeprom(slave_num, types);
     CHECK_RC(rc, "读取或解析 EEPROM 失败", err_close);
@@ -292,6 +305,10 @@ MASTER_API int ethercat_init(const MasterConfig* cfg) {
     GM_PDO_Map_Print(slave_list, 0);
 
     rc = device_match(slave_list, types, slave_num);
+    if (rc != 0 && device_bind_error()[0]) {
+        snprintf(g_start_error, sizeof(g_start_error), "%s", device_bind_error());
+        goto err_close;
+    }
     CHECK_RC(rc, "设备句柄装配失败", err_close);
 
     /* 装配完成后建按槽设备表——这是本层对 HAL 的取数口。 */

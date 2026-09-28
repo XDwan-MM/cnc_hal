@@ -20,8 +20,8 @@
 
 #include <stdint.h>
 
-#define HAL_C_ABI_MAJOR  1u
-#define HAL_C_ABI_MINOR  2u
+#define HAL_C_ABI_MAJOR  2u
+#define HAL_C_ABI_MINOR  3u
 
 #define HAL_C_MAX_DEV     30u   /* 轴 / IO / 面板 各自的容量上限 */
 #define HAL_C_MAX_SPINDLE 4u    /* 主轴容量上限（一台机床几根就够） */
@@ -35,6 +35,23 @@ typedef struct HalContext HalContext;
  * 只有轴号一种。**主轴也用这个寻址**——它就是一根轴，只是多了转速语义；
  * 再给一个 HalSpindleId 就是同一个东西两个名字。 */
 typedef uint16_t HalAxisId;      /* **就是逻辑轴号本身**，不是装配下标 */
+
+/* 按轴实例查询的功能。0x6FFF 报警控制尚无设备定义，因此不会宣告可用。 */
+#define HAL_FUNC_POSITION       1u
+#define HAL_FUNC_SPEED          2u
+#define HAL_FUNC_ERROR_CODE     3u
+#define HAL_FUNC_ALARM_CONTROL  4u
+#define HAL_CAP_READY           1u
+#define HAL_CAP_UNSUPPORTED     2u
+#define HAL_CAP_NOT_CONFIGURED  3u
+
+typedef struct {
+    uint32_t function;
+    uint32_t state;
+    int32_t  slave_pos;
+    int32_t  axis_index;
+    char     reason[96];
+} HalCCapability;
 
 /* ---- 参数取值 ----
  * 用宏而不是 enum：C 的 enum 底层宽度由实现定义，不适合跨 ABI。 */
@@ -146,6 +163,7 @@ typedef struct {
     double   command_pos;               /* 用户单位 */
     uint16_t raw_status;                /* 原始状态字 0x6041，诊断用 */
     uint16_t error_code;                /* 驱动器故障码 0x603F */
+    int32_t  error_code_valid;          /* 0x603F 未映射时为 0，error_code 此时无效 */
 } HalCAxisStatus;
 
 typedef struct {
@@ -168,3 +186,9 @@ typedef struct {
     int32_t  family_index;              /* 同 vendor+product 的第几台（0 起，按总线顺序） */
     uint64_t device_id;                 /* serial 非零取 serial，否则 FNV(vendor,product,revision) */
 } HalCIdentity;
+
+typedef struct {
+    int32_t slave_pos;                  /* 实际扫描顺序；包含未配置和未识别的从站 */
+    int32_t axis_count;                 /* 已装配的物理轴数 */
+    HalCIdentity identity;
+} HalCSlaveInfo;

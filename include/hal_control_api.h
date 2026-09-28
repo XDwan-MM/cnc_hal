@@ -16,6 +16,11 @@ int32_t hal_axis_resolve(const HalContext*, int32_t logical_axis, HalAxisId* out
 /* 返回非负数量，参数错误返回负数。 */
 int32_t hal_axis_count(const HalContext*);
 int32_t hal_device_identity(const HalContext*, HalAxisId, HalCIdentity*);
+/* 查询一根已配置轴上的功能能力；只读启动时的绑定结果，不访问总线。 */
+int32_t hal_axis_capability(const HalContext*, HalAxisId, uint32_t function, HalCCapability*);
+int32_t hal_slave_count(const HalContext*);
+int32_t hal_slave_info(const HalContext*, int32_t slave_pos, HalCSlaveInfo*);
+int32_t hal_slave_capability(const HalContext*, int32_t slave_pos, uint32_t function, HalCCapability*);
 
 #ifdef __cplusplus
 }

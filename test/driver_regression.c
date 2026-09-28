@@ -29,7 +29,7 @@ void* __wrap_calloc(size_t count, size_t size) {
 static const char* fail_call;
 static int fail_code = -7, fail_index, fail_nth = 1;
 static int sdk_calls, allocations, releases, closes, io_releases, handshakes;
-static int slaves = 1, bad_eeprom, missing_mode, wrong_width, use_fallback;
+static int slaves = 1, bad_eeprom, missing_mode, missing_optional, wrong_width, use_fallback;
 static int actual_eeprom_length, fallback_reads, fallback_frees;
 static int unknown_device;
 static uint16_t status_word = 0x23, read_fail_index, write_fail_index;
@@ -126,6 +126,9 @@ static size_t make_eeprom(unsigned char* data, int six_axis) {
                     const DevDictObject* obj = &kDs402Std[j];
                     if (obj->is_tx != (dir == Tx)) continue;
                     if (missing_mode && obj->role == DEV_DICT_ROLE_MODE_DISPLAY) continue;
+                    if (missing_optional && (obj->role == DEV_DICT_ROLE_ERROR_CODE ||
+                        obj->role == DEV_DICT_ROLE_ACTUAL_SPEED ||
+                        obj->role == DEV_DICT_ROLE_TARGET_SPEED)) continue;
                     PDO_ENTRY_ITEM entry = {0};
                     entry.index = obj->index + 2048 * axis;
                     entry.bitLen = wrong_width && obj->role == DEV_DICT_ROLE_ACTUAL_POS ? 16 : obj->bits;
@@ -275,6 +278,17 @@ static void lifecycle_tests(void) {
     config.cycle_timeout_ms = 5000;
     assert_closed();
     int before = sdk_calls;
+    const char* configured_path = getenv("CNC_HAL_DEVICES_JSON");
+    CHECK(configured_path && *configured_path);
+    char valid_path[4096];
+    CHECK(snprintf(valid_path, sizeof(valid_path), "%s", configured_path) < (int)sizeof(valid_path));
+    CHECK(setenv("CNC_HAL_DEVICES_JSON", "/nonexistent/cnc-hal-devices.json", 1) == 0);
+    CHECK(ethercat_init(&config) == MASTER_DEVICE_DICTIONARY_ERROR && sdk_calls == before);
+    assert_closed();
+    CHECK(setenv("CNC_HAL_DEVICES_JSON", "", 1) == 0);
+    CHECK(ethercat_init(&config) == MASTER_DEVICE_DICTIONARY_ERROR && sdk_calls == before);
+    assert_closed();
+    CHECK(setenv("CNC_HAL_DEVICES_JSON", valid_path, 1) == 0);
     CHECK(ethercat_init(NULL) < 0);
     MasterConfig invalid = config; invalid.cycle_us = 249;
     CHECK(ethercat_init(&invalid) < 0 && sdk_calls == before);
@@ -322,10 +336,19 @@ static void lifecycle_tests(void) {
         CHECK(all_slots[k].slave_pos == k / 6 && all_slots[k].axis_index == k % 6);
     CHECK(ethercat_close() == 0);
     slaves = 1;
+    missing_optional = 1;
+    CHECK(ethercat_init(&config) == 0);
+    CHECK(Master_ServoHasRole(0, DEV_DICT_ROLE_STATUS_WORD));
+    CHECK(!Master_ServoHasRole(0, DEV_DICT_ROLE_ERROR_CODE));
+    CHECK(!Master_ServoHasRole(0, DEV_DICT_ROLE_ACTUAL_SPEED));
+    CHECK(Master_ServoWrite(0, DEV_DICT_ROLE_TARGET_SPEED, 0) == -2);
+    CHECK(ethercat_close() == 0);
+    missing_optional = 0;
     int* bad[] = {&bad_eeprom, &missing_mode, &wrong_width};
     for (size_t i = 0; i < 3; ++i) {
         *bad[i] = 1; before = handshakes;
         CHECK(ethercat_init(&config) < 0 && handshakes == before);
+        if (bad[i] == &missing_mode) CHECK(strstr(Master_StartupError(), "0x6061") != NULL);
         assert_closed(); *bad[i] = 0;
     }
     const int lengths[] = {0, 20, 4*1024*1024+1};

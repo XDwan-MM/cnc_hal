@@ -3,5 +3,8 @@
 # 忽略所有临时文件
 /tmp
 /.claude
-/docs
+/docs/*
+!/docs/api-reference.md
+!/docs/release-2026-10-01.md
+!/docs/p0-sdk-audit.md
 !/tmp/交接文档.md

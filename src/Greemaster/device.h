@@ -188,5 +188,5 @@ const DEVICE_BASIC_INFO* device_identity_get(int slave_pos);
 
 int get_device_info_from_eeprom(int slave_num, DEVICE_TYPE* types);
 int device_match(Slave_info* list, DEVICE_TYPE* type, int slave_num);
+const char* device_bind_error(void);
 #endif
-

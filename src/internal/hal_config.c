@@ -90,6 +90,7 @@ void hal_error_text(int32_t code, char* out, uint32_t len) {
     case HAL_ERROR_STATE: text = "调用顺序错误"; break;
     case HAL_ERROR_MEMORY: text = "内存分配失败"; break;
     case HAL_ERROR_TIMEOUT: text = "启动总预算已耗尽"; break;
+    case HAL_ERROR_UNSUPPORTED: text = "设备不支持该功能"; break;
     default: text = "未知错误"; break;
     }
     (void)fail(out, len, code, text);
