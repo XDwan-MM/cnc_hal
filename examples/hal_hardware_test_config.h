@@ -9,7 +9,7 @@ typedef struct {
     double target;               /* axis 用例的绝对目标位置，单位与该轴 HAL 配置的用户单位一致。 */
     double max_step;             /* 本次允许的最大位移：|target - 当前反馈位置|，同上单位；不是速度限制。 */
     double tolerance;            /* 目标到位和 offset 差值判定的允许误差，同上单位。 */
-    double calibrated_position; /* calibrate 用例把轴当前位置定义成此坐标，同上单位；需独立基准确认。 */
+    double calibrated_position;  /* calibrate 用例把轴当前位置定义成此坐标，同上单位；需独立基准确认。 */
     double offset_test_delta;    /* offset 用例第二次启动时给 enc_off 增加的量，同上单位；必须非零。 */
 } HalFeedHardwareCase;
 
