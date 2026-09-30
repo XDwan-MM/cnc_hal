@@ -1,6 +1,9 @@
 # CNC HAL C API 接口文档
 
-适用范围：当前公开 C ABI 4.0（`HAL_C_ABI_MAJOR=4`，`HAL_C_ABI_MINOR=0`）。
+适用范围：当前公开 C ABI 5.0（`HAL_C_ABI_MAJOR=5`，`HAL_C_ABI_MINOR=0`）。
+> **5.0 相对 4.0 的变化**：新增 `hal_io_image_size()`。函数增删按本工程的版本策略属
+> MAJOR，消费者须重编。
+>
 > **4.0 相对 3.0 的变化**：新增 `hal_rt_axis_fault_reset()` 与 `hal_rt_axis_fault_reset_state()`
 > 两个周期接口、新增 `hal_bus_health()` 非周期查询，`HalCConfig` 新增
 > `fault_reset_timeout_ms` 字段。函数增删按本工程的版本策略属 MAJOR，消费者须重编。本文以 `include/` 中的声明及 `src/internal/` 中的实现为准。厂商 SDK、`src/Greemaster/` 内部函数和 `examples/` 测试辅助函数不属于公开 API。
@@ -53,7 +56,7 @@ if (rc == HAL_OK) {
 
 | 成员 | 类型 | 要求与含义 |
 | --- | --- | --- |
-| `abi_major` | `uint16_t` | 必须 `== HAL_C_ABI_MAJOR`（当前 **4**）。契约／语义变更时升它。 |
+| `abi_major` | `uint16_t` | 必须 `== HAL_C_ABI_MAJOR`（当前 **5**）。契约／语义变更时升它。 |
 | `abi_minor` | `uint16_t` | 必须 `== HAL_C_ABI_MINOR`（当前 **0**）。**结构布局变更**（字段增删改序）时升它。 |
 | `struct_size` | `uint16_t` | 必须 `== sizeof(HalCConfig)`，**精确相等**而不是「至少」—— 它是唯一能挡住字段插入的检查。 |
 | `reserved` | `uint16_t` | 必须为 `0`。显式填充位，不依赖编译器对齐。 |
@@ -741,7 +744,27 @@ if (hal_slave_capability(ctx, 0, HAL_FUNC_ALARM_CONTROL, &cap) == HAL_OK)
 - **库没有写 `0x6FFF` 的公开函数**，也没有提供报警控制的执行接口 —— 这个查询目前只是把状态如实报出来。
 - 同 3.3.4：返回 0 只代表查询成功，能力是否可用看 `out->state`。
 
-### 3.4 总线健康
+### 3.4 IO 映像段长
+
+#### `hal_io_image_size()`
+
+```c
+int32_t hal_io_image_size(const HalContext* c, uint32_t* x_size, uint32_t* y_size);
+```
+
+带出输入/输出映像的**实际字节数**：`x_size` = 各 X 段（起始地址 + 段长）末尾的最大值，
+`y_size` 同理；段长由各设备实际装配到的 Entry 位长求和后向上取整。
+
+**为什么需要它：** `hal_rt_io_snapshot_inputs()` / `hal_rt_io_flush_outputs()` 收的是
+"一整块映像"，调用方往自己的寄存器区拷贝时得知道拷多少。没有这个接口就只能自己
+拍一个数字，设备一改就静默错位——"调用方与 HAL 各有一套对地址域的理解"。
+
+返回 `HAL_OK`；`c` 或任一指针为空返回 `HAL_ERROR_ARGUMENT`；未 start 返回
+`HAL_ERROR_NOT_RUNNING`（此时设备还没枚举，段长未知）。
+
+与周期线程并发调用时须由调用方同步——与本节其余非周期查询同一条约定。
+
+### 3.5 总线健康
 
 #### `hal_bus_health()`
 

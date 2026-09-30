@@ -20,9 +20,10 @@
 
 #include <stdint.h>
 
-/* 4.0：新增故障复位与总线健康查询两个公共函数（函数增按本文件的策略是 MAJOR），
- * 并新增 HalCConfig.fault_reset_timeout_ms 字段。 */
-#define HAL_C_ABI_MAJOR  4u
+/* 5.0：新增 hal_io_image_size()（函数增按本文件的策略是 MAJOR）。
+ * 4.0：新增故障复位与总线健康查询两个公共函数，并新增
+ *      HalCConfig.fault_reset_timeout_ms 字段。 */
+#define HAL_C_ABI_MAJOR  5u
 #define HAL_C_ABI_MINOR  0u
 
 #define HAL_C_MAX_DEV     30u   /* 轴 / IO / 面板 各自的容量上限 */

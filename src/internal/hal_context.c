@@ -475,6 +475,14 @@ int32_t hal_bus_health(const HalContext* c, HalCBusHealth* out) {
     return HAL_OK;
 }
 
+int32_t hal_io_image_size(const HalContext* c, uint32_t* x_size, uint32_t* y_size) {
+    if (!c || !x_size || !y_size) return HAL_ERROR_ARGUMENT;
+    if (!c->running) return HAL_ERROR_NOT_RUNNING;
+    *x_size = c->x_size;
+    *y_size = c->y_size;
+    return HAL_OK;
+}
+
 int32_t hal_slave_count(const HalContext* c) {
     if (!c) return -HAL_ERROR_ARGUMENT;
     return c->running ? c->slave_count : -HAL_ERROR_NOT_RUNNING;

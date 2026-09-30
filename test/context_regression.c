@@ -767,10 +767,31 @@ static void fault_reset_and_bus_health(void) {
     hal_context_destroy(c2);
 }
 
+static void io_image_size(void) {
+    HalCConfig cfg = config();
+    HalContext* c = create(&cfg);
+    uint32_t xs = 99, ys = 99;
+    /* 未 start 时设备还没枚举，段长未知 */
+    CHECK(hal_io_image_size(c, &xs, &ys) == HAL_ERROR_NOT_RUNNING);
+    CHECK(hal_context_start(c, NULL, 0) == 0);
+    CHECK(hal_io_image_size(c, &xs, &ys) == HAL_OK);
+    /* 按测试配置手算一遍，确认 HAL 的累加口径：
+     *   IO 段 ：x_start=2，4 个 Entry 位长 3+12+1+32 = 48 位 → 6 字节 → 末尾 8
+     *           y_start=1，2 个 Entry 位长 5+12   = 17 位 → 3 字节 → 末尾 4
+     *   面板段：x_start=10，1 个 Entry 9 位 → 2 字节 → 末尾 12
+     *           y_start=6 ，1 个 Entry 9 位 → 2 字节 → 末尾 8
+     *   x_size = 各 X 段末尾最大值 = 12；y_size = 8 */
+    CHECK(xs == 12 && ys == 8);
+    CHECK(hal_io_image_size(NULL, &xs, &ys) == HAL_ERROR_ARGUMENT);
+    CHECK(hal_io_image_size(c, NULL, &ys) == HAL_ERROR_ARGUMENT);
+    CHECK(hal_io_image_size(c, &xs, NULL) == HAL_ERROR_ARGUMENT);
+    hal_context_destroy(c);
+}
+
 int main(void) {
     lifecycle(); binding(); optional_capabilities(); motion_io(); wrap_and_faults();
     stop_overrides_staged_enable(); concurrent_stop();
     preset_overflow_probe(); spindle_origin_angle(); angle_regressions();
-    fault_reset_and_bus_health();
+    fault_reset_and_bus_health(); io_image_size();
     printf("context_regression: %u checks passed\n", checks);
 }
