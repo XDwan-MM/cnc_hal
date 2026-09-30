@@ -1,0 +1,996 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>CNC HAL × cnc_rt 代码导读</title>
+<style>
+  :root{
+    --bg:#fbfbfa; --fg:#1f2328; --muted:#5b6470; --line:#e3e6e9;
+    --accent:#1f6feb; --ok:#1a7f37; --warn:#9a6700; --bad:#cf222e;
+    --code-bg:#f4f6f8; --card:#ffffff;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+       font:15.5px/1.8 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif}
+  .wrap{display:flex;max-width:1400px;margin:0 auto}
+  nav{position:sticky;top:0;align-self:flex-start;width:262px;height:100vh;overflow:auto;
+      padding:22px 14px;border-right:1px solid var(--line);background:var(--card);flex:none}
+  nav h2{font-size:12.5px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);
+         margin:18px 0 6px;font-weight:600}
+  nav a{display:block;padding:3.5px 8px;border-radius:6px;color:var(--fg);text-decoration:none;font-size:13.5px}
+  nav a:hover{background:var(--code-bg);color:var(--accent)}
+  main{flex:1;min-width:0;padding:40px 52px 140px}
+  h1{font-size:28px;margin:0 0 6px;letter-spacing:-.01em}
+  .sub{color:var(--muted);margin:0 0 34px;font-size:14.5px}
+  h2{font-size:22px;margin:58px 0 14px;padding-top:16px;border-top:2px solid var(--line)}
+  h2:first-of-type{border-top:none;padding-top:0}
+  h3{font-size:17px;margin:32px 0 10px}
+  h4{font-size:15px;margin:22px 0 8px;color:var(--muted);font-weight:600}
+  p{margin:11px 0}
+  code{background:var(--code-bg);padding:1.5px 5px;border-radius:4px;font-size:13.5px;
+       font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  pre{background:var(--code-bg);border:1px solid var(--line);border-radius:8px;
+      padding:13px 15px;overflow:auto;font-size:13px;line-height:1.62;margin:11px 0}
+  pre code{background:none;padding:0;font-size:inherit}
+  .loc{display:block;font-size:12.5px;color:var(--muted);margin:16px 0 4px;
+       font-family:ui-monospace,Menlo,monospace}
+  .loc::before{content:"▸ ";color:var(--accent)}
+  table{border-collapse:collapse;width:100%;margin:13px 0;font-size:14px}
+  th,td{border:1px solid var(--line);padding:8px 11px;text-align:left;vertical-align:top}
+  th{background:var(--code-bg);font-weight:600}
+  .card{background:var(--card);border:1px solid var(--line);border-left:3px solid var(--accent);
+        border-radius:8px;padding:13px 17px;margin:15px 0}
+  .card.why{border-left-color:var(--warn)}
+  .card.why strong:first-child{color:var(--warn)}
+  .card.warn{border-left-color:var(--bad)}
+  .card.warn strong:first-child{color:var(--bad)}
+  .card p:first-child{margin-top:0}.card p:last-child{margin-bottom:0}
+  .step{display:inline-block;min-width:22px;height:22px;line-height:22px;text-align:center;
+        border-radius:50%;background:var(--accent);color:#fff;font-size:12.5px;font-weight:600;margin-right:8px}
+  ul,ol{padding-left:24px}li{margin:6px 0}
+  hr{border:none;border-top:1px solid var(--line);margin:42px 0}
+  .tree{font-family:ui-monospace,Menlo,monospace;font-size:13px;line-height:1.7}
+  .hint{color:var(--muted);font-size:13.5px}
+  @media(max-width:980px){nav{display:none}main{padding:24px}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<nav>
+  <h2>开始之前</h2>
+  <a href="#what">0 · 这是什么</a>
+  <a href="#map">1 · 全局：谁调用谁</a>
+  <h2>HAL 侧</h2>
+  <a href="#headers">2 · 四个公共头</a>
+  <a href="#structs">3 · 三个结构体</a>
+  <a href="#boot">4 · 上电：create 与 start</a>
+  <a href="#cycle">5 · 一个周期：三拍</a>
+  <a href="#ds402">6 · DS402 状态机</a>
+  <a href="#units">7 · 单位换算</a>
+  <h2>RT 侧</h2>
+  <a href="#threads">8 · 线程拓扑</a>
+  <a href="#adapter">9 · 适配层</a>
+  <a href="#config">10 · 配置从哪来</a>
+  <a href="#motion">11 · 一根轴动起来</a>
+  <a href="#fault">12 · 故障与复位</a>
+  <h2>动手</h2>
+  <a href="#run">13 · 怎么跑起来看</a>
+  <a href="#glossary">附录 · 术语与缩写</a>
+</nav>
+
+<main>
+
+<h1>CNC HAL × cnc_rt 代码导读</h1>
+<p class="sub">
+  这份文档带你读完全部代码。建议开两个窗口：一边这份，一边编辑器。<br>
+  顺序是<strong>先看全局，再从 HAL 的门口往里走，最后看 RT 怎么用它</strong>。
+  每节末尾有「停下来想一下」，答得上来就可以往下走。
+</p>
+
+<h2 id="what">0 · 这是什么</h2>
+
+<p>两个工程，一个关系：<strong>cnc_rt 是机床的大脑，HAL 是它的手脚。</strong></p>
+
+<table>
+  <tr><th style="width:210px">工程</th><th>干什么</th></tr>
+  <tr><td><code>/home/mxh/CNC/HAL</code></td>
+      <td>硬件抽象层。管 EtherCAT 总线、管驱动器（使能、状态、位置、速度）、管 IO 和面板。
+          编译成一个静态库 <code>libcnc_hal.a</code></td></tr>
+  <tr><td><code>/home/mxh/CNC/cnc_rt</code></td>
+      <td>实时端。跑插补、轨迹、补偿、软限位、PLC、报警。它<strong>调用</strong> HAL 来操作硬件</td></tr>
+</table>
+
+<div class="card why">
+<p><strong>先说清边界，不然读代码时会一直纠结"这个该谁做"。</strong></p>
+<table>
+  <tr><th>归 HAL</th><th>归 cnc_rt</th></tr>
+  <tr><td>EtherCAT 收发、PDO 映射</td><td>轨迹规划、插补</td></tr>
+  <tr><td>驱动器使能、DS402 状态机</td><td>回零策略、软限位</td></tr>
+  <tr><td>原始计数 ↔ 毫米/度/rpm 的换算</td><td>螺距补偿、反向间隙</td></tr>
+  <tr><td>IO 映像的打包与下发</td><td>PLC 梯形图、坐标系</td></tr>
+  <tr><td>把硬件故障变成错误码</td><td><strong>决定要不要报警、要不要停</strong></td></tr>
+</table>
+<p>最容易被忽略的一条：<strong>HAL 不做判断</strong>。总线健康它只给你原始计数（CRC 错了多少次、超时多少次），
+什么算异常、要不要报警，全归 RT。</p>
+</div>
+
+<p>还有一个前提要知道：<strong>RT 链接的是 HAL 的静态库副本</strong>，
+放在 <code>cnc_rt/lib/cnc_hal/</code> 下（和 <code>lib/parser</code> 那几个库一个套路）。</p>
+
+<pre class="tree">cnc_rt/lib/cnc_hal/
+├── include/          公共头 —— RT 业务代码只看这一层
+├── internal/         HAL 内部头 —— 只有调试构建的桩会看
+├── lib/libcnc_hal.a  静态库
+└── sync.sh           HAL 改了之后重跑这个同步</pre>
+
+<hr>
+
+<h2 id="map">1 · 全局：谁调用谁</h2>
+
+<p>先看这张图，后面每一节都在解释它的一部分。</p>
+
+<pre class="tree">【cnc_rt 主程序】                        【HAL 静态库】
+                                        ┌──────────────────────────────┐
+  main.cpp                              │  hal_context.c               │
+   ├─ 读机床参数 ──────┐                 │   ├─ hal_context_create()    │
+   ├─ rt_hal_create() ─┼────────────────▶│   ├─ hal_context_start()     │
+   ├─ rt_hal_start() ──┘                 │   └─ 周期三拍：                │
+   ├─ init_rt_sem()                      │       wait / begin / commit  │
+   ├─ threads_start()                    │                              │
+   └─ 等关闭信号 → join → shutdown        │  ┌────────────────────────┐  │
+                                        │  │ 驱动层 src/Greemaster/ │  │
+  ┌─── 4 个工作线程 ────────────────┐    │  │  ethercat_init()       │  │
+  │                                │    │  │  Master_WaitCycle()    │  │
+  │ PDO 线程   rt_hal_pdo_loop()  ─┼────▶│  │  Master_ServoStep()    │  │
+  │  ↑ 唯一碰 HalContext 的线程     │    │  │  Master_IoReadEntry()  │  │
+  │                                │    │  └───────────┬────────────┘  │
+  │ PLC 线程   读写 REG_X/REG_Y     │    │              ▼               │
+  │ 运动线程   emcmotTrajPlan()     │    │       /opt/GreeMaster        │
+  │ 规划线程   emcmotPathPlan()     │    │        （厂商 SDK）           │
+  └────────────────────────────────┘    └──────────────────────────────┘
+      ▲            ▲
+      │ 快照/请求  │ 信号量
+  ┌───┴────────────┴───┐
+  │ 适配层              │
+  │ rt_hal_adapter.c    │  ← 这里是唯一的"接头"
+  └─────────────────────┘</pre>
+
+<p>两条主线，建议按这个顺序读代码：</p>
+
+<table>
+  <tr><th style="width:80px">主线</th><th>从哪读到哪</th></tr>
+  <tr><td><strong>上电</strong></td>
+      <td><code>main.cpp</code> → <code>rt_hal_create</code> → <code>hal_context_start</code> →
+          <code>ethercat_init</code> → 设备绑定 → 线程起来</td></tr>
+  <tr><td><strong>运动</strong></td>
+      <td><code>emcmotTrajPlan</code> → <code>rt_hal_request_axis_pos</code> →（请求缓冲）→
+          <code>rt_hal_pdo_loop</code> → <code>hal_rt_axis_write_pos</code> → PDO → 驱动器</td></tr>
+</table>
+
+<hr>
+
+<h2 id="headers">2 · 四个公共头</h2>
+
+<p>HAL 的<strong>全部</strong>对外能力就在这四个文件里。先读它们，别急着进 <code>.c</code>。</p>
+
+<pre class="tree">include/
+├── hal_types.h         配置与状态的数据结构（最重要，先读它）
+├── hal_config_api.h    返回码 + 配置校验 + 错误文本
+├── hal_control_api.h   生命周期、设备查询
+├── hal_rt_api.h        周期接口（实时线程用）
+└── hal_c_api.h         上面四个的聚合头，业务代码只 include 这一个</pre>
+
+<h3>先读 hal_types.h</h3>
+
+<p>打开它，你会先看到一段关于<strong>版本闸门</strong>的说明。这是整个 ABI 的地基：</p>
+
+<span class="loc">include/hal_types.h</span>
+<pre><code>#define HAL_C_ABI_MAJOR  5u
+#define HAL_C_ABI_MINOR  0u
+
+typedef struct {
+    uint16_t abi_major;    /* 必须 == HAL_C_ABI_MAJOR */
+    uint16_t abi_minor;    /* 必须 == HAL_C_ABI_MINOR */
+    uint16_t struct_size;  /* 必须 == sizeof(HalCConfig)，<b>精确相等</b> */
+    uint16_t reserved;     /* 必须为 0 */
+    ...
+} HalCConfig;</code></pre>
+
+<div class="card why">
+<p><strong>为什么要三个字段而不是一个版本号？</strong>因为它们是三件不同的事：</p>
+<ul>
+  <li><code>abi_major</code> 管<b>语义</b>——函数增减、返回码含义变了</li>
+  <li><code>abi_minor</code> 管<b>布局</b>——结构体字段增删改序</li>
+  <li><code>struct_size</code> 是最后的保险：<b>精确相等</b>而不是"至少"。
+      只有精确相等才能挡住"在中间插了个字段"这种旧程序看不出来的改动</li>
+</ul>
+<p>RT 那边在<code>main.cpp</code> 里按这三个值填，HAL 在 <code>hal_config_validate()</code> 里逐个对。
+对不上就直接拒，不会带着错位的结构体往下跑。</p>
+</div>
+
+<h3>配置长什么样</h3>
+
+<p>配置是一份<strong>扁平的定长数组</strong>——启动时传一次，运行中不再变。看一眼总览：</p>
+
+<pre><code>HalCConfig
+├── 版本闸门 + 主站参数（cycle_us / 各种 timeout / dc_enable）
+├── axes[30]       进给轴：绑哪个从站、当量多少、急停怎么办
+├── spindles[4]    主轴：在通用轴属性之上加 max_speed / 速度窗口
+├── ios[30]        普通 IO 模块：从站号 + X/Y 起始字节
+└── panels[30]     操作面板：同上 + panel_type</code></pre>
+
+<div class="card why">
+<p><strong>两个设计决定值得注意：</strong></p>
+<p><b>① 主轴单独一张表</b>，没塞进 <code>axes[]</code>。因为主轴多出转速侧的东西（转速上限、到位窗口、CSV↔CSP 切换），
+混在一起会让轴表越来越脏。代价是 HAL 内部要同时遍历两张表——所以你会看到
+<code>hal_context.c</code> 里的 <code>axis_at()</code> 这种辅助函数。</p>
+<p><b>② 没有"通道"这一维</b>。<code>hal_types.h</code> 里专门写了理由：通道是<strong>加工组织</strong>
+（一条独立的加工执行流，自己的程序、轴组、坐标系），不是硬件属性。删掉实时端业务层，
+"轴 3 属于通道 2"就没意义了。</p>
+</div>
+
+<h3>再看 hal_rt_api.h</h3>
+
+<p>这是实时线程用的接口。它的<strong>文件头注释</strong>把周期契约说完了，值得逐字读：</p>
+
+<pre><code>/* 周期面 —— 由单个 RT 线程串行调用，一个周期固定三拍：
+ *
+ *     hal_rt_wait_cycle()  →  hal_rt_begin_cycle()  →  hal_rt_commit_cycle()
+ *
+ * wait 是唯一的阻塞点。begin 与 commit 之间可以调 write_* / read_*；
+ * read_* 读的是本次 begin 采到的快照，begin 之前没有快照。
+ * write_* 一律只暂存，到 commit 才真正下发总线——所以同一拍里
+ * 先写后读，读不到自己刚写的值。 */</code></pre>
+
+<div class="card why">
+<p><strong>最后那句话是整个设计里最反直觉的一点，值得单独说。</strong></p>
+<p>程序员的直觉是：<code>write_pos(10)</code> 然后 <code>read_pos()</code> 应该读到 10。但这里不是。</p>
+<p>为什么：因为 <code>write_*</code> 只是把值放进暂存区（<code>a-&gt;pos_command</code> 加个 <code>pos_dirty</code> 标志），
+<code>read_*</code> 读的是本拍 <code>begin</code> 从总线采回来的快照。两个东西不是一回事。</p>
+<p>这么设计是为了让「一拍」有个明确的边界：<b>begin 之后总线的输入定死，commit 的时候输出一次性发出去</b>。
+如果允许边写边读，就得处理"发到一半"的状态。</p>
+</div>
+
+<hr>
+
+<h2 id="structs">3 · HAL 内部：三个结构体</h2>
+
+<p>打开 <code>src/internal/hal_context.c</code>，先看开头三个结构体。看懂它们，整个文件就没有神秘感了。</p>
+
+<h3>HalContext —— 一次 HAL 实例的全部运行数据</h3>
+
+<span class="loc">src/internal/hal_context.c : struct HalContext</span>
+<pre><code>struct HalContext {
+    HalCConfig config;          /* create 时拷入，运行期只读 */
+    atomic_int stop_requested;  /* 其它线程可写；周期线程前后查它 */
+    int running;                /* start 成功后置 1 */
+    int phase;                  /* 0 空闲 / 1 已 wait / 2 已 begin —— 卡调用顺序 */
+    int sampled;                /* 跑过至少一轮 begin */
+    int fault;                  /* 粘性总线错误，一错到底 */
+    int axis_count, io_count, slave_count;
+    HalCSlaveInfo slaves[HAL_C_MAX_DEV];
+    uint32_t x_size, y_size;    /* 输入/输出映像需要多少字节 */
+    Axis axes[HAL_C_MAX_DEV];   /* 前 axis_count 个有效（含主轴） */
+    Io   ios[HAL_C_MAX_DEV];    /* 前 io_count 个有效 */
+};</code></pre>
+
+<p><code>phase</code> 是理解周期三拍的关键。它就是个状态机：</p>
+
+<pre class="tree">phase=0  ──wait_cycle()──▶  phase=1  ──begin_cycle()──▶  phase=2  ──commit_cycle()──▶  phase=0
+                                              ▲
+                                     你的业务代码在这段里跑
+                                     （读写轴、读写 IO）</pre>
+
+<p>每个函数开头都检查自己该在哪个 phase，不在就返回 <code>HAL_ERROR_STATE</code>。
+这就是"调用顺序错了会当场告诉你"的机制。</p>
+
+<h3>Axis —— 一根轴</h3>
+
+<p>字段看着多，分成五组就好懂了：</p>
+
+<table>
+  <tr><th style="width:180px">分组</th><th>字段</th><th>作用</th></tr>
+  <tr><td>配置副本</td><td><code>cfg</code>、<code>spindle_cfg</code>、<code>identity</code></td>
+      <td>启动时从 <code>HalCConfig</code> 拷来的</td></tr>
+  <tr><td>绑定结果</td><td><code>slot</code>、<code>spindle</code>、<code>has_speed</code>、<code>has_error</code></td>
+      <td>在驱动设备表里的槽号、是不是主轴、有没有速度/故障 PDO</td></tr>
+  <tr><td>状态机</td><td><code>request</code>、<code>desired_mode</code>、<code>mode</code>、<code>motion_ready</code></td>
+      <td>要往哪个 DS402 状态推、要什么模式、实际什么模式</td></tr>
+  <tr><td>暂存的指令</td><td><code>pos_command</code>、<code>speed_command</code>、<code>pos_dirty</code>、<code>speed_dirty</code></td>
+      <td>begin 与 commit 之间写进来的东西，commit 时发出去</td></tr>
+  <tr><td>反馈与坐标</td><td><code>raw_pos</code>、<code>counts</code>、<code>command_offset</code>、<code>feedback_offset</code></td>
+      <td>原始计数、展开后的累计计数、两侧坐标基准</td></tr>
+</table>
+
+<div class="card why">
+<p><strong><code>raw_pos</code> 和 <code>counts</code> 为什么要两个？</strong></p>
+<p>驱动器给的原始位置是 <b>32 位计数</b>，会回绕（走到 2³¹ 附近翻成负数）。<code>counts</code> 是把它
+<b>展开</b>成连续的累计值，方法在 <code>sample_axis()</code> 里：</p>
+<pre><code>double delta = signed32(raw - a-&gt;raw_pos);   /* 本拍比上拍走了多少 */
+if (wrap == MODULAR) delta = remainder(delta, period);   /* 模循环取最短差 */
+a-&gt;counts += delta;
+a-&gt;raw_pos = raw;</code></pre>
+<p>光有 <code>raw_pos</code>，你没法区分"往前走了 10 个计数"和"往后退了 4294967286 个计数"。</p>
+</div>
+
+<h3>Io —— 一块 IO 模块或面板</h3>
+
+<p>面板和 IO 模块共用这个结构，差别只在绑定时的类型过滤和 Entry 来源。</p>
+
+<pre class="tree">Io
+├── slot         在驱动设备表里的槽号
+├── x, y         这一段映像在 PLC 地址域里的<b>字节</b>基址
+├── in_count/out_count   输入/输出 Entry 的<b>个数</b>
+├── in_bits[64]/out_bits[64]   每个 Entry 的<b>位长</b>
+├── inputs[256]  本拍按位序打包好的输入映像
+└── outputs[64]  待下发的输出值，每个 Entry 一个词</pre>
+
+<div class="card why">
+<p><strong>为什么要存每个 Entry 的位长？</strong>因为不同设备的 Entry 小数位数不一样，
+不能假定都是 16 位。<code>bind_io()</code> 会把位长累加起来算出一段占多少字节（<code>(总位数+7)/8</code>），
+采样时还会拿实际读到的位长跟它<strong>对一下</strong>——对不上直接报 <code>HAL_ERROR_BUS</code>，
+不静默错位。</p>
+</div>
+
+<hr>
+
+<h2 id="boot">4 · 上电：create 与 start</h2>
+
+<p>这两个函数把配置变成能用的东西。分两步是<strong>故意的</strong>：create 不碰硬件，start 才碰。</p>
+
+<h3><span class="step">1</span>hal_context_create()</h3>
+
+<span class="loc">src/internal/hal_context.c : hal_context_create()（第 263 行）</span>
+
+<pre class="tree">hal_context_create(config, &amp;ctx, err, len)
+  ├─ hal_config_validate(config, err, len)   ← 静态校验，不碰设备
+  ├─ calloc 分配 HalContext
+  ├─ c->config = *config                     ← 拷一份，不持有调用方的指针
+  ├─ atomic_init(stop_requested, 0)
+  └─ reset_runtime(c)                        ← 清快照、把配置整理成内部 axes[]/ios[]</pre>
+
+<div class="card why">
+<p><strong>为什么 create 之后不能直接用？</strong>因为这时候还不知道总线上到底挂了什么。
+create 成功只说明"配置自洽、内存分配好了"。真正的绑定要等 start。</p>
+<p>这也解释了为什么 <code>build_hal_config_check.sh</code> 能离线跑——它只用到 create 之前的静态校验。</p>
+</div>
+
+<h3><span class="step">2</span>hal_context_start()</h3>
+
+<span class="loc">src/internal/hal_context.c : hal_context_start()（第 281 行）</span>
+
+<p>按顺序做六件事：</p>
+
+<ol>
+  <li><b>检查 owner</b> —— SDK 的主站是进程全局单例，已有 context 启动过就拒</li>
+  <li><b>reset_runtime()</b> —— 清掉上次运行的残留</li>
+  <li><b>构造 MasterConfig</b> —— 从公共配置翻译成驱动层认识的格式</li>
+  <li><b>ethercat_init()</b> —— 启动主站：读 EEPROM、分配 PDO 资源、握手进 OP</li>
+  <li><b>DeviceTable_Get()</b> —— 拿到实际扫描出来的设备槽表</li>
+  <li><b>逐轴 bind_axis()、逐 IO bind_io()</b>，最后检查地址段有没有重叠</li>
+</ol>
+
+<p>重点看第 6 步。<code>bind_axis()</code> 干的事是<strong>用配置里的（从站号，从站内轴号）去设备表里认领这一轴</strong>：</p>
+
+<span class="loc">src/internal/hal_context.c : bind_axis()（第 160 行）</span>
+<pre><code>for (int i = 0; i &lt; count; ++i) {
+    const DeviceSlot* s = &amp;slots[i];
+    if (s-&gt;slave_pos != a-&gt;cfg.slave_pos || s-&gt;axis_index != a-&gt;cfg.axis_index) continue;
+    if (s-&gt;type != SERVO_TYPE &amp;&amp; s-&gt;type != GREE_AXIS6_TYPE &amp;&amp; ...) continue;
+    a-&gt;slot = i;
+    /* 关键：查 PDO 的位长对不对 */
+    if (h-&gt;statusWord.bit_length != 16 || h-&gt;act_pos.bit_length != 32 || ...)
+        return HAL_ERROR_UNSUPPORTED;
+    a-&gt;has_speed = h-&gt;act_speed.bit_length == 32 &amp;&amp; h-&gt;target_speed.bit_length == 32;
+    ...</code></pre>
+
+<div class="card warn">
+<p><strong>绑不上就不让启动，不做降级。</strong>找不到设备、类型不对、PDO 位长不符——
+任何一条都直接失败。理由很简单：<b>一台轴绑不上的机床不能跑</b>，
+与其带着半个配置启动、之后在现场某个动作里突然出错，不如启动时就死给你看。</p>
+</div>
+
+<h3>三个编号，别搞混</h3>
+
+<p>这是最容易出错的地方，专门说一下：</p>
+
+<table>
+  <tr><th>叫法</th><th>是什么</th><th>谁给</th></tr>
+  <tr><td><b>逻辑轴号</b>（<code>HalAxisId</code>）</td>
+      <td>HAL 对外的轴标识，业务代码用它寻址</td>
+      <td>配置里的 <code>logical_axis</code> 字段</td></tr>
+  <tr><td><b>槽号</b>（<code>slot</code>）</td>
+      <td>在驱动设备表里的下标</td>
+      <td>start 时绑出来的</td></tr>
+  <tr><td><b>从站位置 + 轴序号</b></td>
+      <td>总线上的物理位置（一台从站可能含多根轴）</td>
+      <td>配置里指定，用来认领设备</td></tr>
+</table>
+
+<p><code>find_axis()</code> 遍历 <code>axes[]</code> 比较 <code>logical_axis == id</code>，
+<b>不是</b>直接访问 <code>axes[id]</code>——因为它俩不是一回事。</p>
+
+<hr>
+
+<h2 id="cycle">5 · 一个周期：三拍</h2>
+
+<p>这是 HAL 的核心。三拍各自干什么，读 <code>hal_rt_api.h</code> 的头注释就够，这里讲"为什么"。</p>
+
+<h3><span class="step">1</span>hal_rt_wait_cycle() —— 等节拍</h3>
+
+<span class="loc">src/internal/hal_context.c : hal_rt_wait_cycle()（第 515 行）</span>
+
+<pre><code>int32_t hal_rt_wait_cycle(HalContext* c) {
+    int rc = gate(c); if (rc) return rc;          /* 空指针/未运行/已停止/故障闭锁 */
+    if (c-&gt;phase != 0) return HAL_ERROR_STATE;    /* 上一拍没走完 */
+    rc = Master_WaitCycle();                     /* ★ 唯一的阻塞点：等周期中断 + 收一帧 */
+    if (atomic_load(&amp;c-&gt;stop_requested) || rc == MASTER_STOP_REQUESTED) return HAL_ERROR_STOPPED;
+    if (rc) return bus_error(c);
+    c-&gt;phase = 1;
+    return HAL_OK;
+}</code></pre>
+
+<p><code>Master_WaitCycle()</code> 内部是 SDK 的 <code>GM_Wait_Master_Sync()</code> + <code>GM_Master_Receive()</code>。
+等不到就等，等超时就报错。</p>
+
+<h3><span class="step">2</span>hal_rt_begin_cycle() —— 采样 + 推状态机</h3>
+
+<span class="loc">src/internal/hal_context.c : hal_rt_begin_cycle()（第 575 行）</span>
+
+<p>这一步有意思的地方在于它<strong>跑两遍循环</strong>：</p>
+
+<pre><code>/* 第一遍：所有轴先采样、算好这一拍状态机要做什么，<b>不写任何 PDO</b> */
+for (int i = 0; i &lt; c-&gt;axis_count; ++i) {
+    Axis* a = &amp;c-&gt;axes[i];
+    if (sample_axis(a)) return bus_error(c);        /* 读五个 PDO 角色 */
+    ...
+    planned[i] = Ds402_NextStepReq(a-&gt;status.raw_status, ..., a-&gt;request, ...);
+    ...
+}
+
+/* 第二遍：确认全部没问题了，才真的写控制 PDO */
+for (int i = 0; i &lt; c-&gt;axis_count; ++i) { ... Master_ServoStep(...) ... }</code></pre>
+
+<div class="card why">
+<p><strong>为什么要两遍？</strong>因为如果边算边写，第 3 根轴在算的时候发现换算有问题、要返回错误，
+前两根轴的控制字<b>已经写出去了</b>。那就成了"部分使能"——比整拍失败更难收拾的状态。</p>
+<p>所以：<b>先全部算完，确认无误，再统一写。</b></p>
+</div>
+
+<p><code>sample_axis()</code> 读五样东西：实际位置、状态字、实际模式、故障码、实际速度。
+然后做那件重要的事——<b>把原始计数展开成累计计数</b>（见第 3 节的 <code>raw_pos</code> / <code>counts</code>），
+最后按反馈当量和 <code>enc_off</code> 算出用户单位的位置。</p>
+
+<h3><span class="step">3</span>hal_rt_commit_cycle() —— 下发</h3>
+
+<span class="loc">src/internal/hal_context.c : hal_rt_commit_cycle()（第 647 行）</span>
+
+<pre><code>/* 先处理急停：它可能在 begin 之后才到达，要覆盖本拍旧的控制字和速度目标 */
+if ((a-&gt;zero_speed || a-&gt;stop_override) &amp;&amp; a-&gt;has_speed)
+    Master_ServoWrite(a-&gt;slot, DEV_DICT_ROLE_TARGET_SPEED, 0);
+if (a-&gt;stop_override)
+    Master_ServoWrite(a-&gt;slot, DEV_DICT_ROLE_CONTROL_WORD, ...);
+
+/* 再发本拍暂存的指令 */
+if (a-&gt;pos_dirty)   Master_ServoWrite(a-&gt;slot, DEV_DICT_ROLE_TARGET_POS, a-&gt;pos_command);
+if (a-&gt;speed_dirty) Master_ServoWrite(a-&gt;slot, DEV_DICT_ROLE_TARGET_SPEED, a-&gt;speed_command);
+
+/* IO 同理，整 Entry 下发 */
+...
+
+rc = Master_CommitCycle();   /* 最后：GM_Master_Send(1)，整帧发出去 */
+c-&gt;phase = 0;</code></pre>
+
+<div class="card warn">
+<p><strong>急停为什么放在最前面覆盖？</strong>因为它是<b>本拍中途</b>才可能到达的。
+如果急停发生在 <code>begin</code> 之后，而 <code>begin</code> 已经按"使能"写了控制字，
+commit 不覆盖的话这一拍照样把使能动作发出去了。</p>
+<p>这就是 <code>stop_override</code> 这个字段存在的全部理由。</p>
+</div>
+
+<hr>
+
+<h2 id="ds402">6 · DS402 状态机</h2>
+
+<p>文件：<code>src/common/Ds402.h</code>。它是 <strong>header-only、零依赖</strong>的纯函数，
+可以离线穷举测试——这是有意的，因为它是最不该出错的一段。</p>
+
+<h3>驱动器不是"一个使能位"</h3>
+
+<p>伺服驱动器上电后不能直接命令它动。它有一套状态机（CiA402 标准），必须一台阶一台阶上：</p>
+
+<pre class="tree">SwitchOnDisabled (0x40)
+      │  写控制字 0x06 (Shutdown)
+      ▼
+ReadyToSwitchOn (0x21)
+      │  写 0x07 (Switch On)  ── 同时<b>必须</b>把目标位置设成当前位置（防飞车）
+      ▼
+SwitchedOn (0x23)
+      │  写 0x0F (Enable Operation)
+      ▼
+OperationEnabled (0x237)   ← 到这儿才收位置/速度指令
+</pre>
+
+<p><code>Ds402_NextStepReq()</code> 就是回答"这一拍该写什么"：给它状态字、当前模式、上层请求，
+它返回一个 <code>Ds402Step</code>（要写的控制字、要设的模式、要不要预置位置）。</p>
+
+<div class="card warn">
+<p><strong>那个"预置目标位置"是防飞车的，不是可选优化。</strong></p>
+<p>从 <code>ReadyToSwitchOn</code> 进 <code>SwitchedOn</code> 那一拍，如果目标位置还是 0，
+驱动会以为"你要走到零点"，然后<b>全速冲过去</b>。</p>
+<p>所以 <code>preset_target</code> 标志为真时，必须先把「目标位置」设成「当前实际位置」。
+<code>Ds402.h</code> 里专门写了注释强调这件事。</p>
+</div>
+
+<h3>状态字怎么读</h3>
+
+<pre><code>/* 用掩码+期望值的方式判断，对可选位保持宽松——部分固件不置某些位 */
+#define DS402_SW_MASK_SWITCH_ON_DISABLED 0x004Fu
+#define DS402_SW_VAL_SWITCH_ON_DISABLED  0x0040u
+#define DS402_SW_MASK_READY_TO_SWITCH_ON 0x006Fu
+#define DS402_SW_VAL_READY_TO_SWITCH_ON  0x0021u
+... </code></pre>
+
+<p>判断写法是 <code>(状态字 &amp; MASK) == VAL</code>。<b>不要</b>直接比相等——
+真实驱动器的状态字里有各种可选位（电压有效、快停、远程），直接比会一直判不出来。</p>
+
+<div class="card why">
+<p><strong>还有一条不变量藏在里面：模式不对就不上使能。</strong></p>
+<p>在 <code>SwitchedOn</code> 那一级，如果当前模式不是上层要的模式，它会先去改模式
+（<code>0x6060</code>），下一拍再上使能。而不是"先使能再说，模式以后再改"。</p>
+<p>为什么：<b>让一根轴以错误的模式进入使能态是危险的。</b></p>
+</div>
+
+<hr>
+
+<h2 id="units">7 · 单位换算</h2>
+
+<p>这是全项目<strong>最容易出错</strong>的地方。文件在 <code>hal_context.c</code> 开头几个小函数，看着不起眼。</p>
+
+<h3>只有两条公式</h3>
+
+<pre><code>static double feedback_scale(const Axis* a) {
+    return a-&gt;cfg.feedback_units_per_count * (a-&gt;cfg.feedback_invert ? -1 : 1);
+}
+/* 用户单位 = 计数 × 当量 + 偏移 */
+a-&gt;status.actual_pos = a-&gt;counts * feedback_scale(a) + a-&gt;feedback_offset;</code></pre>
+
+<pre><code>static int to_counts(double value, uint32_t* out) {
+    if (!isfinite(value)) return HAL_ERROR_ARGUMENT;
+    const double rounded = round(value);
+    if (rounded &lt; INT32_MIN || rounded &gt; INT32_MAX) return HAL_ERROR_ARGUMENT;  /* 不静默饱和 */
+    *out = (uint32_t)(int32_t)rounded;
+}</code></pre>
+
+<p>就这些。<code>to_counts()</code> 值得注意的两点：<b>四舍五入</b>，以及
+<b>超范围直接拒绝而不是截断</b>——截断会让轴走到一个你没要的位置。</p>
+
+<h3>enc_off 的符号是个坑</h3>
+
+<div class="card warn">
+<p>初始化在 <code>hal_context.c</code> 的 <code>reset_runtime()</code> 里：</p>
+<pre><code>/* 兼容 RT 的 enc_off：显示坐标=原始反馈坐标-enc_off；命令反向补回。 */
+a-&gt;feedback_offset = -a-&gt;cfg.enc_off;
+a-&gt;command_offset  = -a-&gt;cfg.enc_off;</code></pre>
+<p>注意那个<b>负号</b>。所以配置里传 <code>enc_off</code> 时<b>原样传</b>，不要自己再取反——
+HAL 内部已经转了一次。传反了坐标会整体偏 2×enc_off，而且不报错。</p>
+</div>
+
+<h3>模循环展开</h3>
+
+<p>主轴这类<strong>每转归零</strong>的反馈，原始计数是 0..N-1 循环的。展开时不能直接相减：</p>
+
+<pre><code>double delta = signed32(raw - a-&gt;raw_pos);
+if (a-&gt;cfg.feedback_wrap == HAL_WRAP_MODULAR) {
+    const double period = a-&gt;cfg.feedback_pulses_per_rev;
+    delta = remainder(delta, period);   /* 取最短差 */
+}
+a-&gt;counts += delta;</code></pre>
+
+<p><code>remainder()</code> 而不是 <code>fmod()</code>：前者取<b>绝对值最小的差</b>，
+后者保留被除数的符号。从 350° 走到 10°，你要的是 +20° 而不是 -340°。</p>
+
+<div class="card warn">
+<p><strong><code>feedback_pulses_per_rev</code> 填错的话，症状是"主轴跨圈位置跳"。</strong>
+它必须等于反馈 PDO 的实际每转计数。</p>
+<p>上机验证方法：让主轴<b>正好转一整圈</b>，看 <code>position_deg</code> 是否正好变化 360°。</p>
+</div>
+
+<hr>
+
+<h2 id="threads">8 · RT 侧：线程拓扑</h2>
+
+<p>换到 <code>cnc_rt</code>。先看线程，因为整个 RT 的结构就是"四个线程 + 一堆信号量"。</p>
+
+<h3>四个线程</h3>
+
+<span class="loc">src/threads/threads_controller.cpp</span>
+<pre class="tree">PDO 线程     rt_hal_pdo_loop()        ◀── <b>唯一碰 HalContext 的线程</b>
+PLC 线程     soft_plc_thread_func()   ── 读写 REG_X / REG_Y
+运动线程     motion_controller_thread_func() ── emcmotTrajPlan()
+规划线程     path_plan_thread_func()   ── emcmotPathPlan()</pre>
+
+<p>实时模式下的调度参数也在同一个文件里：</p>
+
+<pre><code>plc_config    = {.core_id = 3, .policy = SCHED_RR,   .priority = 32};
+pdo_config    = {.core_id = 3, .policy = SCHED_FIFO, .priority = 40};
+motion_config = {.core_id = 2, .policy = SCHED_FIFO, .priority = 39};
+path_plan_config = {.core_id = 2, .policy = SCHED_RR, .priority = 30};</code></pre>
+
+<p class="hint">PDO 和 PLC 绑同一个核（3）、运动与规划绑另一个核（2）——靠优先级差保证 PDO 优先。</p>
+
+<h3>信号量怎么把它们串起来</h3>
+
+<span class="loc">src/threads/rt_sem.c</span>
+
+<pre class="tree">PDO 线程                           PLC 线程              运动线程
+   │                                 │                     │
+   │ wait_cycle（等节拍）              │                     │
+   │ begin_cycle（采样）               │                     │
+   ├─── post plc_sem ────────────────▶│                     │
+   ├─── post motion_sem ──────────────┼────────────────────▶│
+   │                                 │  干活               │  干活
+   │                                 ├── post plc_done_sem │
+   │                                 │                     ├── post moton_sem_exec_done
+   │◀── 等 plc_done_cycle ────────────┘                     │
+   │◀── 等 motion_done_cycle ────────────────────────────────┘
+   │ 取走请求 → commit_cycle           │                     │</pre>
+
+<div class="card why">
+<p><strong>为什么要"周期号"而不是只等信号量？</strong></p>
+<p>信号量的计数只证明"有人 post 过"，<b>不证明 post 的是本拍</b>。
+如果运动线程因为某种原因晚了一拍，它的旧结果会被当成下一拍的结果消费掉——
+等于把一拍之前的旧目标当新目标下发。</p>
+<p>所以两个业务线程干完活都要写回"我算的是第几拍"，PDO 线程对不上就继续等。
+字段就是 <code>plc_done_cycle</code> / <code>motion_done_cycle</code>。</p>
+<p class="hint">用 <code>__atomic_*</code> 访问，不能裸读——volatile 不是内存屏障。</p>
+</div>
+
+<hr>
+
+<h2 id="adapter">9 · 适配层</h2>
+
+<p>文件：<code>src/hal/rt_hal_adapter.{h,c}</code>。<strong>先读头文件顶部那张线程约定表</strong>，
+整个接入的骨架就在那几行。</p>
+
+<div class="card why">
+<p><strong>为什么要有适配层，不让业务代码直接调 HAL？</strong></p>
+<p>因为 HAL 要求"写接口只在 begin 与 commit 之间调用"，而那个窗口只有 PDO 线程在跑。
+但业务代码散布在运动线程、PLC 线程、报警路径里。<b>让它们各自去守这个窗口是不现实的。</b></p>
+<p>所以：业务线程只把意图放进请求缓冲，由 PDO 线程统一在本拍取走。</p>
+</div>
+
+<h3>三组口子</h3>
+
+<pre class="tree">读反馈  rt_hal_axis_pos() / _status() / _spindle_speed()
+        └─ 读的是 PDO 线程开始前刷新的<b>快照</b>，不碰 context
+
+发命令  rt_hal_request_axis_pos() / _spindle_speed() / _spindle_mode()
+        └─ 只写请求缓冲；同拍重复请求后者覆盖前者（不排队）
+
+IO      rt_hal_io_fetch_inputs() / rt_hal_io_publish_outputs()
+        └─ PLC 线程取 X 映像、填 Y 映像，真正的总线读写仍在 PDO 线程</pre>
+
+<h3>周期循环</h3>
+
+<span class="loc">src/hal/rt_hal_adapter.c : rt_hal_pdo_loop()</span>
+
+<pre><code>while (!thread_exit_flag) {
+    ++cycle;
+    rc = hal_rt_wait_cycle(s_ctx);        /* 等节拍、收帧 */
+    if (rc) break;
+    rc = hal_rt_begin_cycle(s_ctx);       /* 采样、推 DS402、准备输入映像 */
+    if (rc) break;
+    s_in_cycle = 1;
+
+    publish_snapshot();                   /* 刷新只读快照 */
+    s_io_ready = (hal_rt_io_snapshot_inputs(...) == HAL_OK);
+
+    /* 周期号先写再放行——业务线程醒来才知道自己算第几拍 */
+    __atomic_store_n(&amp;plc_cycle_target, cycle, __ATOMIC_RELEASE);
+    __atomic_store_n(&amp;motion_cycle_target, cycle, __ATOMIC_RELEASE);
+    sem_post(&amp;plc_sem); sem_post(&amp;motion_sem); sem_post(&amp;path_plan_sem);
+
+    struct timespec deadline; make_deadline(&amp;deadline);    /* PLC 与运动共用 */
+    rc = wait_done("PLC", &amp;plc_done_cycle, &amp;plc_done_sem, cycle, &amp;deadline);
+    if (rc) { stop_frame(); break; }
+    rc = wait_done("运动", &amp;motion_done_cycle, &amp;moton_sem_exec_done, cycle, &amp;deadline);
+    if (rc) { stop_frame(); break; }
+
+    take_requests();                      /* 取走本拍命令并下发 */
+    hal_rt_io_flush_outputs(...);
+    rc = hal_rt_commit_cycle(s_ctx);      /* 本拍唯一发送出口 */
+    s_in_cycle = 0;
+    if (rc) break;
+}</code></pre>
+
+<p>出错时的 <code>stop_frame()</code> 干三件事：<b>取消所有轴的本拍运动、按停机映像下发输出、提交一帧</b>，
+然后退出循环交给调用方走停机流程。</p>
+
+<div class="card warn">
+<p><strong>停机映像当前未配置</strong>，所以停机帧<b>不写 Y</b>。
+不能假设"全零就是安全状态"——必须按实际接线逐位确定，由
+<code>rt_hal_io_set_stop_image()</code> 装上。</p>
+</div>
+
+<hr>
+
+<h2 id="config">10 · 配置从哪来</h2>
+
+<p>两条线，分别对应两类配置。</p>
+
+<h3>线一：硬件拓扑 → 写死在 profile 里</h3>
+
+<span class="loc">src/hal/rt_hal_config.c</span>
+
+<pre><code>static const RtHalBinding kBindings[RT_HAL_AXIS_COUNT] = {
+    {"X",  RT_SLAVE_X,       0, 0, 0},   /* RT 槽 0 → 从站 3，HAL 逻辑轴号 0 */
+    {"Y",  RT_SLAVE_Y,       0, 1, 0},
+    {"Z",  RT_SLAVE_Z,       0, 2, 0},
+    {"SP", RT_SLAVE_SPINDLE, 0, 3, 1},   /* 主轴在从站 2 */
+};</code></pre>
+
+<p>这些是<strong>机床装配事实</strong>——哪根轴插在总线的哪个位置。改拓扑要改代码。</p>
+
+<h3>线二：换算量 → 从机床参数域取</h3>
+
+<p>当量、<code>enc_off</code> 这些<strong>每台机床不同</strong>，存在共享内存的参数域里
+（Qt 界面写进去的）。RT 启动时读出来：</p>
+
+<span class="loc">main.cpp : fill_hal_params()</span>
+<pre><code>const RT_AXIS* a = &amp;rt_data-&gt;axis_data[rt_slot[i]];
+if (a-&gt;pm_pulse == 0 || a-&gt;pm_munit == 0) continue;   /* 参数缺失 → 不装载 */
+
+params[i].scaling.units_per_count = (double)a-&gt;pm_munit / (double)a-&gt;pm_pulse;
+params[i].scaling.enc_off         = a-&gt;enc_off;        /* 原样，不取反 */
+params[i].scaling.feedback_pulses_per_rev = a-&gt;mt_ppr &gt; 0 ? a-&gt;mt_ppr : a-&gt;pm_pulse;</code></pre>
+
+<h3>未确认台账：一个"挡住运动"的开关</h3>
+
+<p>如果换算依据没确认，<strong>宁可挡住运动，也不猜一个值让程序继续</strong>。
+实现是一个位掩码：</p>
+
+<span class="loc">src/hal/rt_hal_config.c : recompute_todo()</span>
+<pre><code>uint32_t t = RT_HAL_TODO_IO_MAP | RT_HAL_TODO_MOTION;   /* 两个常量位，只能改代码清 */
+for (int i = 0; i &lt; RT_HAL_AXIS_COUNT; ++i) {
+    if (!s_scaling_ok[i]) t |= RT_HAL_TODO_SCALING | RT_HAL_TODO_ENC_OFF;
+    if (!s_pulses_ok[i])  t |= RT_HAL_TODO_ENCODER;
+}
+s_todo = t;</code></pre>
+
+<p>任何要动的地方都得先过 <code>rt_hal_config_motion_allowed()</code>。
+启动日志里会把没清的项逐条打出来。</p>
+
+<div class="card why">
+<p><strong>注意"开放运动"是<b>改代码</b>，不是改配置。</strong>
+<code>IO_MAP</code> 和 <code>MOTION</code> 是写死的常量位，只能删掉才清。
+这是有意设计的闸门——它要的是一次"我确认过了"的显式动作。</p>
+</div>
+
+<hr>
+
+<h2 id="motion">11 · 一根轴动起来</h2>
+
+<p>现在把前面全串起来，跟着一次位置指令走完。</p>
+
+<h3>读取反馈</h3>
+
+<span class="loc">src/motion/emcmot.cpp : read_from_hal()</span>
+<pre><code>double pos = 0.0;
+if (rt_hal_axis_pos(RT_HAL_AXIS_X, &amp;pos) == HAL_OK)
+    rt_data-&gt;axis_data[AXIS_X].motor_act_pos = pos;</code></pre>
+
+<p>就三行。旧版本这里是"取原始脉冲 → 调 <code>pulses_to_position()</code> 换算 → 减 enc_off"，
+现在全由 HAL 做了。<code>rt_hal_axis_pos</code> 给的就是毫米。</p>
+
+<h3>发布指令</h3>
+
+<span class="loc">src/motion/emcmot.cpp : output_to_hal()</span>
+<pre><code>(void)rt_hal_request_axis_pos(RT_HAL_AXIS_X, rt_data-&gt;axis_data[AXIS_X].motor_cmd_pos);</code></pre>
+
+<p>只是把意图放进请求缓冲。<strong>真正的下发在 PDO 线程的 take_requests 里。</strong></p>
+
+<h3>整条链</h3>
+
+<pre class="tree">plan_block（轨迹规划的结果，机械坐标 mm）
+   │
+   ▼  emcmot.cpp 算补偿、软限位检查
+motor_cmd_pos（mm）
+   │
+   ▼  rt_hal_request_axis_pos()  ← 只写请求缓冲
+s_req_pos[slot] + s_req_pos_dirty[slot]
+   │
+   ▼  PDO 线程 take_requests()
+hal_rt_axis_write_pos(ctx, id, pos)
+   │
+   ▼  to_counts()：(pos - command_offset) / 当量
+a-&gt;pos_command（原始计数）+ pos_dirty
+   │
+   ▼  commit_cycle()
+Master_ServoWrite(slot, DEV_DICT_ROLE_TARGET_POS, pos_command)
+   │
+   ▼  GM_RxPdoEntry_Write() → GM_Master_Send()
+驱动器</pre>
+
+<h3>主轴是特例</h3>
+
+<p>主轴的转速走另一条路。<code>spl_control.c</code> 里有个<strong>软件斜坡</strong>——
+RT 自己算加减速，每个周期把当前该有的转速发给 HAL：</p>
+
+<pre><code>const double spd = spl_data.current_speed;
+(void)rt_hal_request_spindle_speed(RT_HAL_AXIS_SP, fabs(spd),
+                                   spd &gt; 0.0 ? 1 : (spd &lt; 0.0 ? -1 : 0));</code></pre>
+
+<p>注意它把<strong>带符号的 rpm 拆成了"幅值 + 方向"</strong>——因为 HAL 的接口就是这么设计的
+（<code>rpm</code> 必须非负，转向由 <code>dir</code> 给）。</p>
+
+<div class="card why">
+<p><strong>还有个小东西值得知道：<code>spl_ramp_active</code>。</strong></p>
+<p>旧代码用 <code>spindle.mode</code> 这个字段<b>同时</b>表达两件事：
+"RT 要不要继续推进斜坡"和"期望驱动器工作在哪个模式"。</p>
+<p>接 HAL 后必须拆开——HAL 里<b>没有"模式关闭"这个状态</b>（只有 CSV/CSP 加使能位），
+而旧的那个语义既不是切模式也不是去使能，纯粹是 RT 自己停推斜坡。
+所以它是 RT 本地的一个变量，就是 <code>spl_ramp_active</code>。</p>
+</div>
+
+<hr>
+
+<h2 id="fault">12 · 故障与复位</h2>
+
+<p>文件：<code>src/protect/alarm.c</code>。</p>
+
+<h3>两类错误要分清</h3>
+
+<table>
+  <tr><th style="width:150px">类别</th><th>来源</th><th>怎么处理</th></tr>
+  <tr><td><b>总线错误</b></td><td>HAL 的周期调用返回非零</td>
+      <td>HAL 内部<b>闭锁</b>——首个错误码被记住，此后每个周期调用都返回它，直到 stop/start</td></tr>
+  <tr><td><b>驱动器故障</b></td><td>状态字的 Fault 位（0x0008）</td>
+      <td>要发"故障复位"清除，清完轴停在<b>未使能</b></td></tr>
+</table>
+
+<h3>HAL 错误 → 报警号</h3>
+
+<span class="loc">src/protect/alarm.c</span>
+<pre><code>#define HAL_ALARM_BUS            120  /* 总线错误 */
+#define HAL_ALARM_TIMEOUT        121
+#define HAL_ALARM_NOT_RUNNING    123
+...
+#define HAL_ALARM_RESET_TIMEOUT  131
+
+void alarm_report_hal_error(int32_t rc) {
+    if (rc == HAL_OK) return;
+    char text[96];
+    hal_error_text(rc, text, sizeof(text));      /* HAL 给中文描述 */
+    setAlarm(ALARM_ETHCAT_SV, ALARM_ERROR, hal_code_to_alarm(rc));
+}</code></pre>
+
+<div class="card warn">
+<p><strong>HAL 的错误码是正数，不能沿用旧 RT 那套 <code>rc &lt; 0</code> 判断。</strong>
+这是接入时最容易写错的一处——写错了会"出错当成功"，而且不报错。</p>
+</div>
+
+<h3>为什么是 PDO 线程来报错</h3>
+
+<div class="card why">
+<p>有一段曲折值得知道。<code>alarm_poll_hal()</code> 本来放在运动线程里每拍调，
+但<b>周期循环一旦因总线错误退出，PDO 线程就不再 post motion_sem</b>，
+运动线程会卡在 <code>sem_wait</code> 上——<code>alarm_poll_hal</code> 再也不会跑。</p>
+<p><b>报警恰好会在最该报的时候丢掉。</b></p>
+<p>所以现在的做法是：发现错误的人（PDO 线程）自己报。
+<code>pdo_thread_func</code> 拿到 <code>rt_hal_pdo_loop()</code> 的返回值后直接调
+<code>alarm_report_hal_error()</code>。</p>
+</div>
+
+<h3>故障复位链</h3>
+
+<pre class="tree">操作员按复位（或急停 G8.4 由 0 变 1 触发自动复位）
+   │
+   ▼  task_handle_hmi_event → rt_data-&gt;nc_event = SYS_EVENT_HMI_RESET
+   │
+   ▼  handle_alarm_cmd()：清报警、重置数据
+   │     └─ rt_hal_request_fault_reset() × 4 轴   ← 只记意图
+   │
+   ▼  PDO 线程 take_requests()
+hal_rt_axis_fault_reset(ctx, id)
+   │     └─ 置 request = DS402_REQ_FAULT_RESET，记下超时周期号
+   │
+   ▼  下一拍 begin_cycle()：状态字还有 Fault 位就写控制字 0x80
+   │     （每拍重发，直到离开 Fault 或超时）
+   │
+   ▼  状态字离开 Fault → reset_state = DONE，request 改回 DISABLE
+   │
+   ▼  alarm_poll_hal()：四轴都到终态 → 记录"复位完成，轴保持未使能"</pre>
+
+<div class="card warn">
+<p><strong>复位后是未使能，不会自动恢复运动。</strong>
+要继续动必须显式重新使能，并再经一次 begin 确认状态机到位。</p>
+<p>这是有意的：<b>驱动器刚从故障恢复时自动上使能是危险的。</b></p>
+</div>
+
+<hr>
+
+<h2 id="run">13 · 怎么跑起来看</h2>
+
+<h3>构建</h3>
+
+<pre><code># 1) 先编 HAL（RT 依赖它的产物）
+cd /home/mxh/CNC/HAL &amp;&amp; ./build_all.sh
+
+# 2) 把 HAL 的产物同步进 RT（HAL 改了之后必须重跑）
+cd /home/mxh/CNC/cnc_rt &amp;&amp; ./lib/cnc_hal/sync.sh
+
+# 3) 编 RT（同时出调试版与实时版）
+bash build.sh all
+# 产物：bin/cnc_rt_d（调试）、bin/cnc_rt（实时）</code></pre>
+
+<h3>三个验证入口</h3>
+
+<p><b>① 配置层——不需要 root，秒出</b></p>
+<pre><code>cd /home/mxh/CNC/cnc_rt &amp;&amp; ./test/build_hal_config_check.sh</code></pre>
+<p class="hint">45 项检查：装配、正向校验、各种反向闸门、换算量装载、台账重算。</p>
+
+<p><b>② 端到端——需要 root（共享内存库拒绝非 root 进程）</b></p>
+<pre><code>cd /home/mxh/CNC/cnc_rt
+sudo ./test/rt_offline_smoke.sh 6            # 参数域为空 → 占位值 + 满台账
+sudo ./test/rt_offline_smoke.sh 6 params     # 注入台架参数 → 真实当量
+sudo ./test/rt_offline_smoke.sh 8 fault      # 注入轴故障 → 验证复位链
+sudo ./test/rt_offline_smoke.sh 6 busfail    # 注入总线故障 → 验证错误转报警</code></pre>
+<p class="hint">
+  跑的是<b>调试版</b>——它链接的是内存桩 <code>rt_hal_sim_backend.c</code>，不碰真总线。
+  <code>rt_offline_helper.c</code> 代替 Qt 界面置启动信号、写参数域。
+</p>
+
+<p><b>③ HAL 自身的回归</b></p>
+<pre><code>cd /home/mxh/CNC/HAL &amp;&amp; ctest --test-dir build/all --output-on-failure</code></pre>
+
+<h3>想看运行时的数据？</h3>
+
+<p>调试版支持一个环境变量，会打一次只读快照：</p>
+<pre><code>CNC_RT_DUMP=1 ./bin/cnc_rt_d</code></pre>
+<pre><code>[HAL] ===== 只读快照 @第 100 拍（未使能）=====
+  HAL轴0  身份=SIM feed     vendor=0x1234 product=0x9002 | 使能=0 位置=-150.000000 状态字=0x0040
+  ...
+  输入映像 X 前 12 字节: 00 00 00 00 00 00 00 00 10 00 00 00</code></pre>
+<p class="hint">位置 −150 正是 <code>enc_off=150</code> 的效果——这一条就把整条换算链验掉了。</p>
+
+<hr>
+
+<h2 id="glossary">附录 · 术语与缩写</h2>
+
+<table>
+  <tr><th style="width:160px">词</th><th>意思</th></tr>
+  <tr><td><b>PDO</b></td><td>Process Data Object。EtherCAT 的周期数据，就是每个周期收发的那一帧</td></tr>
+  <tr><td><b>DS402</b></td><td>CiA402，伺服驱动器的标准状态机与对象字典</td></tr>
+  <tr><td><b>Entry</b></td><td>PDO 里的一个数据项，有位长和偏移</td></tr>
+  <tr><td><b>槽（slot）</b></td><td>驱动设备表里的下标。一台从站可能占多个槽（多轴驱动器）</td></tr>
+  <tr><td><b>逻辑轴号</b></td><td>HAL 对外的轴标识，业务代码用它寻址</td></tr>
+  <tr><td><b>当量</b></td><td>一个计数等于多少用户单位。命令侧和反馈侧可以不同</td></tr>
+  <tr><td><b>enc_off</b></td><td>坐标偏置。语义是"原始位置 − enc_off = 机床坐标"</td></tr>
+  <tr><td><b>CSP / CSV</b></td><td>周期同步位置 / 周期同步速度。两种运行模式（0x6060 的 8 和 9）</td></tr>
+  <tr><td><b>台账</b></td><td>未确认参数的位掩码。没清空就挡住运动</td></tr>
+  <tr><td><b>快照</b></td><td>PDO 线程在 begin 之后刷新的只读反馈副本，其他线程读它</td></tr>
+  <tr><td><b>停机帧</b></td><td>周期循环异常退出时提交的那一帧：取消运动 + 停机输出</td></tr>
+</table>
+
+<hr>
+
+<div class="card">
+<p><strong>读完之后，建议做这三件事检验一下：</strong></p>
+<ol>
+  <li>跑一遍 <code>sudo ./test/rt_offline_smoke.sh 6 params</code>，对着输出找它对应本文哪一节</li>
+  <li>打开 <code>hal_rt_api.h</code>，把 <code>hal_rt_axis_write_pos</code> 的注释读一遍，看能不能说出"为什么同一拍先写后读读不到"</li>
+  <li>在 <code>rt_hal_config.c</code> 里找到 <code>recompute_todo()</code>，说出"怎样才算可以开放运动"</li>
+</ol>
+</div>
+
+<p class="hint" style="margin-top:36px">
+  本文与 <code>docs/api-reference.md</code>（接口契约）、<code>docs/交接文档.md</code>（仓库现状与未决项）
+  配套。代码位置以函数名搜索为准——行号会随改动漂移。
+</p>
+
+</main>
+</div>
+</body>
+</html>
