@@ -3,8 +3,11 @@
 # 忽略所有临时文件
 /tmp
 /.claude
+
+# docs 下只跟踪两份文档：接口说明与交接文档。
+# 注意这里的例外必须写成 /docs/* + !/docs/具体文件 的形式——
+# 若写成排除整个 /docs 目录，子文件的 ! 例外不生效（Git 的规则：
+# 父目录被排除时无法再包含其中的文件）。之前 /tmp 那条就是这么失效的。
 /docs/*
 !/docs/api-reference.md
-!/docs/release-2026-10-01.md
-!/docs/p0-sdk-audit.md
-!/tmp/交接文档.md
+!/docs/交接文档.md
