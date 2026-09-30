@@ -1,5 +1,7 @@
 # P0：GreeMaster / FPGA 能力核查
 
+> 历史 SDK 能力核查（2026-09-26）。本文 P0/P4 等阶段属于当时的 ESI 研究安排，不是当前 RT 接入任务；当前计划见 `../tmp/RT直接接入HAL实施计划书.md`。
+
 - 日期：2026-09-26
 - 结论状态：P0 方案核查完成；目标硬件实测纳入 P4
 - 本机 SDK：`/opt/GreeMaster/lib/libGREEMASTER.so.1.1.8`
