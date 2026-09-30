@@ -16,6 +16,10 @@ static int fail_init, fail_read, fail_write, fail_step, fail_wait, fail_send, fa
 static int wrong_type, bad_width;
 static int omit_optional, omit_spindle_speed;
 static int stuck_fault;      /* 非零 = 连复位边沿也清不掉故障，用来测超时 */
+/* 驱动层的停止标志，**独立于 HAL 那份**——真实驱动层有自己的一个（main_demo.c:17），
+ * Master_RequestStop() 置它、Master_WaitCycle() 前后查它。这里照抄这个结构，
+ * 才能验出"HAL 的 request_stop 有没有透传到驱动层"。 */
+static int driver_stop;
 static MasterBusHealth health;
 static pthread_barrier_t entered, resume_wait;
 static int block_wait;
@@ -31,6 +35,7 @@ int ethercat_init(const MasterConfig* cfg) {
     if (fail_init) return fail_init;
     received_config = *cfg;
     opened = 1;
+    driver_stop = 0;   /* 与真实 ethercat_init 一致：每次启动清停止标志 */
     memset(slots, 0, sizeof(slots));
     memset(servo, 0, sizeof(servo));
     memset(output, 0, sizeof(output));
@@ -89,9 +94,15 @@ const DEVICE_BASIC_INFO* device_identity_get(int pos) {
     return &ids[pos];
 }
 int DeviceTable_Get(const DeviceSlot** out) { if (out) *out = opened ? slots : NULL; return opened ? 4 : 0; }
+void Master_RequestStop(void) { driver_stop = 1; }
+int  Master_StopFlag(void) { return driver_stop != 0; }
+
 int Master_WaitCycle(void) {
     ++waits;
+    /* 与真实驱动层同构：等待前后都查停止标志，置了就立刻返回 */
+    if (driver_stop) return MASTER_STOP_REQUESTED;
     if (block_wait) { pthread_barrier_wait(&entered); pthread_barrier_wait(&resume_wait); }
+    if (driver_stop) return MASTER_STOP_REQUESTED;
     return fail_wait ? -1 : 0;
 }
 int Master_CommitCycle(void) {
@@ -432,6 +443,11 @@ static void concurrent_stop(void) {
     pthread_barrier_wait(&entered);
     const int before = closes;
     CHECK(hal_context_request_stop(c) == 0 && closes == before);
+    /* request_stop 必须同时通知驱动层。只置 HAL 那份的话，PDO 线程卡在
+     * GM_Wait_Master_Sync 里时叫不醒，要白等一个 cycle_timeout_ms。 */
+    CHECK(driver_stop == 1);
+    /* 且驱动层在"进入等待之前"就该看到它，不必进等待 */
+    CHECK(Master_WaitCycle() == MASTER_STOP_REQUESTED);
     pthread_barrier_wait(&resume_wait);
     void* rc; CHECK(pthread_join(thread, &rc) == 0 && (intptr_t)rc == HAL_ERROR_STOPPED);
     block_wait = 0;

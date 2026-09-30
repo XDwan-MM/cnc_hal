@@ -12,7 +12,7 @@
 #include <time.h>
 
 /* 一根轴的运行期状态 = 配置副本 + 采样快照 + 未提交的指令。
- * 轴与主轴共用这个结构（HalAxisId 就落在这里的下标上），转速侧字段对进给轴无意义。 */
+ * 轴与主轴共用这个结构，转速侧字段对进给轴无意义。 */
 typedef struct {
     HalCAxisCfg    cfg;          /* 生效的配置副本；主轴取自 spindle_cfg.axis */
     HalCSpindleCfg spindle_cfg;  /* 仅主轴有效：转速上限与到位窗口来自这里 */
@@ -382,10 +382,15 @@ bad:
     return report(result, err, len, detail);
 }
 
-/* 只写原子通知，不关主站——资源留到 stop。可与周期调用并发。 */
+/* 只写原子通知，不关主站——资源留到 stop。可与周期调用并发。
+ *
+ * 两份通知都要置：HAL 自己那份让后续接口返回 STOPPED，驱动层那份让
+ * Master_WaitCycle() 在等待前后能提前退出。只置前者的话，PDO 线程若正卡在
+ * GM_Wait_Master_Sync 里就得白等一个 cycle_timeout_ms 才醒。 */
 int32_t hal_context_request_stop(HalContext* c) {
     if (!c) return HAL_ERROR_ARGUMENT;
     atomic_store(&c->stop_requested, 1);
+    Master_RequestStop();
     return HAL_OK;
 }
 
@@ -527,6 +532,7 @@ int32_t hal_rt_wait_cycle(HalContext* c) {
  * 位移小于半个计数周期——否则丢掉的整转从单个模计数里认不出来。任一读失败即总线故障。 */
 static int sample_axis(Axis* a) {
     uint32_t raw, sw, mode, error = 0, velocity = 0;
+    // 尝试读取五个角色的 PDO，若有任何一个失败则返回总线错误
     if (Master_ServoRead(a->slot, DEV_DICT_ROLE_ACTUAL_POS, &raw) ||
         Master_ServoRead(a->slot, DEV_DICT_ROLE_STATUS_WORD, &sw) ||
         Master_ServoRead(a->slot, DEV_DICT_ROLE_MODE_DISPLAY, &mode) ||
