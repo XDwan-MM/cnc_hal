@@ -20,6 +20,7 @@ int32_t hal_config_validate(const HalCConfig* c, char* err, uint32_t len) {
     if (c->topology_fingerprint)
         return fail(err, len, HAL_ERROR_CONFIG, "拓扑指纹算法尚未启用，请使用 0"); // TODO 指纹算法未定暂时都填0
     if (c->cycle_us < 250 || !c->start_timeout_ms || !c->cycle_timeout_ms ||
+        !c->fault_reset_timeout_ms ||
         (c->dc_enable != 0 && c->dc_enable != 1))
         return fail(err, len, HAL_ERROR_CONFIG, "主站周期、超时或 DC 配置无效");
     if (c->axis_count < 0 || c->axis_count > (int)HAL_C_MAX_DEV ||

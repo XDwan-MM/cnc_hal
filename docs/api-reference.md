@@ -1,6 +1,9 @@
 # CNC HAL C API 接口文档
 
-适用范围：当前公开 C ABI 3.0（`HAL_C_ABI_MAJOR=3`，`HAL_C_ABI_MINOR=0`）。本文以 `include/` 中的声明及 `src/internal/` 中的实现为准。厂商 SDK、`src/Greemaster/` 内部函数和 `examples/` 测试辅助函数不属于公开 API。
+适用范围：当前公开 C ABI 4.0（`HAL_C_ABI_MAJOR=4`，`HAL_C_ABI_MINOR=0`）。
+> **4.0 相对 3.0 的变化**：新增 `hal_rt_axis_fault_reset()` 与 `hal_rt_axis_fault_reset_state()`
+> 两个周期接口、新增 `hal_bus_health()` 非周期查询，`HalCConfig` 新增
+> `fault_reset_timeout_ms` 字段。函数增删按本工程的版本策略属 MAJOR，消费者须重编。本文以 `include/` 中的声明及 `src/internal/` 中的实现为准。厂商 SDK、`src/Greemaster/` 内部函数和 `examples/` 测试辅助函数不属于公开 API。
 
 ## 1. 引入与调用流程
 
@@ -50,7 +53,7 @@ if (rc == HAL_OK) {
 
 | 成员 | 类型 | 要求与含义 |
 | --- | --- | --- |
-| `abi_major` | `uint16_t` | 必须 `== HAL_C_ABI_MAJOR`（当前 **3**）。契约／语义变更时升它。 |
+| `abi_major` | `uint16_t` | 必须 `== HAL_C_ABI_MAJOR`（当前 **4**）。契约／语义变更时升它。 |
 | `abi_minor` | `uint16_t` | 必须 `== HAL_C_ABI_MINOR`（当前 **0**）。**结构布局变更**（字段增删改序）时升它。 |
 | `struct_size` | `uint16_t` | 必须 `== sizeof(HalCConfig)`，**精确相等**而不是「至少」—— 它是唯一能挡住字段插入的检查。 |
 | `reserved` | `uint16_t` | 必须为 `0`。显式填充位，不依赖编译器对齐。 |
@@ -738,6 +741,28 @@ if (hal_slave_capability(ctx, 0, HAL_FUNC_ALARM_CONTROL, &cap) == HAL_OK)
 - **库没有写 `0x6FFF` 的公开函数**，也没有提供报警控制的执行接口 —— 这个查询目前只是把状态如实报出来。
 - 同 3.3.4：返回 0 只代表查询成功，能力是否可用看 `out->state`。
 
+### 3.4 总线健康
+
+#### `hal_bus_health()`
+
+```c
+int32_t hal_bus_health(const HalContext* c, HalCBusHealth* out);
+```
+
+取最近一次收帧的总线健康快照，填进 `HalCBusHealth`（见 §2）。
+
+**只记录不判断**：这里给的是原始计数与标志——`crc_error_count`、`frame_timeout_count`、
+`pdo_warn*`、`dc_warn*`、期望工作计数器——什么算异常、要不要报警，全部归上层。
+HAL 不做映射。
+
+对应旧实时端的 `PdoWar_Info_Get()` + `Master_Hardware_Error` 那条链：旧代码把 CRC 错误和
+帧超时直接映射成 `ALARM_ETHCAT_SV`，新接口不替上层做这件事。
+
+返回 `HAL_OK`；`c` 或 `out` 为空返回 `HAL_ERROR_ARGUMENT`；未 start 返回
+`HAL_ERROR_NOT_RUNNING`。还没收过帧时各字段为 0。
+
+与周期线程并发调用时须由调用方同步——与本节其余非周期查询同一条约定。
+
 ## 4. 周期接口与线程约束
 
 单个周期必须按下面的顺序执行；`wait` 是这组三拍中唯一的阻塞点：
@@ -879,6 +904,49 @@ if (hal_rt_commit_cycle(ctx) != HAL_OK) { running = 0; return; }
 - **这是整帧唯一真正上路的地方。** 此前所有 `write_*` 与 `flush_outputs` 都只是暂存。
 - 任何输出写失败都会**闭锁总线错误**，且**不会继续提交本帧**。PDO 缓冲可能已被部分改动，但这一轮不会发出去。
 - 提交成功后周期回到空闲相，才能进入下一次 `wait`。
+
+### 4.1b 故障复位
+
+#### `hal_rt_axis_fault_reset()`
+
+```c
+int32_t hal_rt_axis_fault_reset(HalContext* c, HalAxisId id);
+```
+
+请求清除驱动器故障，走 DS402 的 Fault Reset（控制字 bit7 = 0x80）。
+
+- **非阻塞**：只置意图，真正的边沿由之后的 `hal_rt_begin_cycle()` 产生。
+- **边沿在状态字仍带 Fault 位（0x0008）时每拍重发**，直到驱动器离开 Fault，或超过
+  配置的 `fault_reset_timeout_ms`。
+- **终态一律是未使能**。不论成功、超时还是中途被急停打断，轴都不会自动恢复使能。
+  要重新运动必须显式 `hal_rt_axis_enable()`，并再经一次 begin 确认状态机到位。
+  这是有意的：驱动器刚从故障恢复时自动上使能是危险的。
+- **幂等**：重复调用等于刷新一次请求（超时重新计时）。
+- **急停优先**：复位期间调 `hal_rt_axis_estop()` 会覆盖它，安全路径不被复位流程挡住。
+- 调用会丢弃该轴尚未提交的运动指令（与急停同理）。
+
+只在「本拍已 begin 且未 commit」时受理。返回 `HAL_OK`；不在该窗口返回
+`HAL_ERROR_STATE`；轴号不存在返回 `HAL_ERROR_ARGUMENT`。
+
+超时按**周期数**计（`fault_reset_timeout_ms × 1000 ÷ cycle_us`，至少 1 拍），
+热路径上不取时钟。
+
+#### `hal_rt_axis_fault_reset_state()`
+
+```c
+int32_t hal_rt_axis_fault_reset_state(const HalContext* c, HalAxisId id, int32_t* out);
+```
+
+带出 `HAL_RESET_*` 之一（见 `hal_config_api.h`）：
+
+| 值 | 含义 |
+|---|---|
+| `HAL_RESET_NONE` | 从未请求过复位 |
+| `HAL_RESET_PENDING` | 已请求，边沿已发，等驱动器离开 Fault |
+| `HAL_RESET_DONE` | 已完成：状态字已离开 Fault。轴保持未使能 |
+| `HAL_RESET_TIMEOUT` | 超时仍未离开 Fault。轴保持未使能 |
+
+非周期安全（只读快照字段），但结果由周期线程推进。
 
 ### 4.2 进给轴
 

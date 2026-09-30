@@ -10,6 +10,7 @@ int main(void) {
     cfg.cycle_us = 1000;
     cfg.start_timeout_ms = 120000;
     cfg.cycle_timeout_ms = 1000;
+    cfg.fault_reset_timeout_ms = 5000;
     HalContext* c = 0;
     if (hal_context_create(&cfg, &c, 0, 0) || !c) return 1;
     const int failed = hal_axis_count(c) != 0 || hal_context_request_stop(c) != 0 || hal_context_stop(c) != 0;

@@ -12,6 +12,7 @@ static HalCConfig good(void) {
     c.cycle_us = 1000;
     c.start_timeout_ms = 120000;
     c.cycle_timeout_ms = 5000;
+    c.fault_reset_timeout_ms = 5000;
     c.axis_count = 1;
     c.axes[0].estop_action = HAL_ESTOP_DISABLE_OPERATION;
     c.axes[0].work_mode = HAL_WORK_POSITION;

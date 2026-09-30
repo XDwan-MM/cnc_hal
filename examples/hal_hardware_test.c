@@ -100,6 +100,7 @@ static int selftest(void) {
     config.cycle_us = 1000;
     config.start_timeout_ms = 10000;
     config.cycle_timeout_ms = 2000;
+    config.fault_reset_timeout_ms = 5000;
     config.axis_count = 3;
     config.spindle_count = 1;
     config.io_count = 1;

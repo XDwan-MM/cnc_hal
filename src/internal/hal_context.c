@@ -28,6 +28,9 @@ typedef struct {
 
     Ds402Request request;  /* 推进方向。每拍都要传，直到状态字显示已达成为止 */
 
+    int      reset_state;    /* HAL_RESET_*：故障复位的进展 */
+    uint64_t reset_deadline; /* 复位超时的周期号（c->cycle_seq 坐标系） */
+
     int angle_base_valid; /* 主轴取消运动后，在再次就绪时用反馈重建刻度基准 */
     int angle_valid;      /* 上次受理的是普通刻度；避免浮点取模把重复命令变成整圈 */
     double angle_command; /* 上次受理的普通刻度原值（保留方向符号） */
@@ -73,6 +76,7 @@ struct HalContext {
     atomic_int stop_requested;  /* 其它线程可写；周期线程在 wait/commit 前后查它 */
     int running;                /* start 成功后置 1；stop 或启动回滚时清 0 */
     int phase;                  /* 周期阶段 0 空闲 / 1 已 wait / 2 已 begin，用来卡调用顺序 */
+    uint64_t cycle_seq;         /* begin 成功一次加一。故障复位超时按它计，D 阶段的周期号也用它 */
     int sampled;                /* 跑过至少一轮 begin；read_* 在此之前拒绝 */
     int fault;                  /* 粘性总线错误码，gate 会一直返回它，直到 stop/start */
     int axis_count;             /* 轴 + 主轴总数；HalAxisId 就在这个下标空间里 */
@@ -231,6 +235,7 @@ static void reset_runtime(HalContext* c) {
     c->slave_count = 0;
     memset(c->slaves, 0, sizeof(c->slaves));
     c->x_size = c->y_size = 0;
+    c->cycle_seq = 0;
     memset(c->axes, 0, sizeof(c->axes));
     memset(c->ios, 0, sizeof(c->ios));
     for (int i = 0; i < c->axis_count; ++i) {
@@ -247,6 +252,8 @@ static void reset_runtime(HalContext* c) {
         a->command_offset = -a->cfg.enc_off;
         a->desired_mode = a->cfg.work_mode == HAL_WORK_POSITION ? DS402_MODE_CSP : DS402_MODE_CSV;
         a->request = DS402_REQ_DISABLE;
+        a->reset_state = HAL_RESET_NONE;
+        a->reset_deadline = 0;
         a->zero_speed = 1;
         a->speed.mode = -1;
     }
@@ -446,6 +453,28 @@ int32_t hal_axis_capability(const HalContext* c, HalAxisId id, uint32_t function
     return HAL_OK;
 }
 
+int32_t hal_bus_health(const HalContext* c, HalCBusHealth* out) {
+    if (!c || !out) return HAL_ERROR_ARGUMENT;
+    if (!c->running) return HAL_ERROR_NOT_RUNNING;
+    /* 驱动层给的是它自己的结构体；这里逐字段搬运而不是 memcpy——两边的字段类型和
+     * 顺序都不保证一致，memcpy 会静默错位。 */
+    MasterBusHealth h;
+    memset(&h, 0, sizeof(h));
+    if (Master_BusHealth(&h) != 0) return HAL_ERROR_BUS;
+    memset(out, 0, sizeof(*out));
+    out->pdo_warn            = h.pdo_warn;
+    out->pdo_warn_code       = h.pdo_warn_code;
+    out->pdo_warn_para       = h.pdo_warn_para;
+    out->dc_warn             = h.dc_warn;
+    out->dc_warn_code        = h.dc_warn_code;
+    out->dc_warn_para        = h.dc_warn_para;
+    out->crc_error_count     = h.crc_err_count;
+    out->frame_timeout_count = h.frame_timeout_count;
+    out->expect_wkc_tx       = h.expect_wkc_tx;
+    out->expect_wkc_rx       = h.expect_wkc_rx;
+    return HAL_OK;
+}
+
 int32_t hal_slave_count(const HalContext* c) {
     if (!c) return -HAL_ERROR_ARGUMENT;
     return c->running ? c->slave_count : -HAL_ERROR_NOT_RUNNING;
@@ -538,6 +567,7 @@ static int sample_axis(Axis* a) {
 int32_t hal_rt_begin_cycle(HalContext* c) {
     int rc = gate(c); if (rc) return rc;
     if (c->phase != 1) return HAL_ERROR_STATE;
+    ++c->cycle_seq;   /* 本拍编号。故障复位的超时判据按它算，不打时钟 */
     Ds402Step planned[HAL_C_MAX_DEV + HAL_C_MAX_SPINDLE];
     uint32_t presets[HAL_C_MAX_DEV + HAL_C_MAX_SPINDLE];
     uint8_t override_preset[HAL_C_MAX_DEV + HAL_C_MAX_SPINDLE] = {0};
@@ -545,6 +575,17 @@ int32_t hal_rt_begin_cycle(HalContext* c) {
     for (int i = 0; i < c->axis_count; ++i) {
         Axis* a = &c->axes[i];
         if (sample_axis(a)) return bus_error(c);
+        /* 故障复位的收尾判断。必须在算 planned[] 之前——结论会改 a->request，
+         * 而 request 正是这一拍状态机的输入。 */
+        if (a->reset_state == HAL_RESET_PENDING) {
+            if (!(a->status.raw_status & DS402_SW_BIT_FAULT)) {
+                a->reset_state = HAL_RESET_DONE;
+                a->request = DS402_REQ_DISABLE;      /* 终态一律未使能，见 API 注释 */
+            } else if (c->cycle_seq >= a->reset_deadline) {
+                a->reset_state = HAL_RESET_TIMEOUT;
+                a->request = DS402_REQ_DISABLE;
+            }
+        }
         planned[i] = Ds402_NextStepReq(a->status.raw_status, (uint16_t)a->mode,
             a->request, (uint16_t)a->desired_mode, DS402_MODESW_DISABLE_FIRST);
         override_preset[i] = planned[i].preset_target &&
@@ -667,6 +708,31 @@ int32_t hal_rt_axis_estop(HalContext* c, HalAxisId id) {
 
 /* 只在 CSP + 已使能 + 状态机到位时受理，否则返回 NOT_RUNNING（沿用公共码，不为
  * 「还没准备好」新造一个）。写的是命令侧坐标，按 command_offset 和命令当量换算。 */
+int32_t hal_rt_axis_fault_reset(HalContext* c, HalAxisId id) {
+    /* 与其它写接口同一条纪律：只允许周期线程在 begin 与 commit 之间改 request。 */
+    if (!c) return HAL_ERROR_ARGUMENT;
+    if (c->phase != 2) return HAL_ERROR_STATE;
+    Axis* a = find_axis(c, id);
+    if (!a) return HAL_ERROR_ARGUMENT;
+    /* 故障复位意味着之前那些运动意图都不作数了。 */
+    cancel_motion(a);
+    a->request = DS402_REQ_FAULT_RESET;
+    a->reset_state = HAL_RESET_PENDING;
+    /* 超时按周期数算而不是打时钟：热路径上不取时间，且与周期配置天然自洽。
+     * 向上取整到至少 1 拍，免得周期比 1ms 还长时算成 0 直接判超时。 */
+    const uint64_t cycles = (uint64_t)c->config.fault_reset_timeout_ms * 1000u / c->config.cycle_us;
+    a->reset_deadline = c->cycle_seq + (cycles ? cycles : 1u);
+    return HAL_OK;
+}
+
+int32_t hal_rt_axis_fault_reset_state(const HalContext* c, HalAxisId id, int32_t* out) {
+    if (!c || !out) return HAL_ERROR_ARGUMENT;
+    const Axis* a = find_axis(c, id);
+    if (!a) return HAL_ERROR_ARGUMENT;
+    *out = a->reset_state;
+    return HAL_OK;
+}
+
 int32_t hal_rt_axis_write_pos(HalContext* c, HalAxisId id, double pos) {
     int rc = gate(c); if (rc) return rc;
     Axis* a = find_axis(c, id);

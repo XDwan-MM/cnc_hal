@@ -14,6 +14,13 @@
 #define HAL_ERROR_TIMEOUT     0x0104
 #define HAL_ERROR_UNSUPPORTED 0x0105
 
+/* 故障复位进展（hal_rt_axis_fault_reset_state 的出参）。
+ * 用宏不用 enum：C 的 enum 底层宽度由实现定义，不适合跨 ABI（与 hal_types.h 同一条规矩）。 */
+#define HAL_RESET_NONE     0   /* 从未请求过复位 */
+#define HAL_RESET_PENDING  1   /* 已请求，边沿已发，等驱动器离开 Fault */
+#define HAL_RESET_DONE     2   /* 已完成：状态字已离开 Fault。轴保持未使能 */
+#define HAL_RESET_TIMEOUT  3   /* 超时仍未离开 Fault。轴保持未使能 */
+
 #ifdef __cplusplus
 extern "C" {
 #endif

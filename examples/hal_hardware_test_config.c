@@ -55,6 +55,7 @@ int hal_hardware_test_config(HalCConfig* config, HalHardwareTestSettings* settin
      config->cycle_us = 1000;            // >= 250
      config->start_timeout_ms = 120000;
      config->cycle_timeout_ms = 5000;
+     config->fault_reset_timeout_ms = 5000; // 故障复位等待上限
      config->dc_enable = 1;
      
      for (int i = 0; i < 3; ++i) {

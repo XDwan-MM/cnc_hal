@@ -15,6 +15,8 @@ static int opened, starts, closes, sends, reads, writes, steps, waits;
 static int fail_init, fail_read, fail_write, fail_step, fail_wait, fail_send, fail_calloc;
 static int wrong_type, bad_width;
 static int omit_optional, omit_spindle_speed;
+static int stuck_fault;      /* 非零 = 连复位边沿也清不掉故障，用来测超时 */
+static MasterBusHealth health;
 static pthread_barrier_t entered, resume_wait;
 static int block_wait;
 static MasterConfig received_config;
@@ -101,6 +103,9 @@ int Master_CommitCycle(void) {
         case 6: servo[i][DEV_DICT_ROLE_STATUS_WORD] = 0x21; break;
         case 7: servo[i][DEV_DICT_ROLE_STATUS_WORD] = 0x23; break;
         case 15: servo[i][DEV_DICT_ROLE_STATUS_WORD] = 0x237; break;
+        /* 0x80 = 故障复位边沿。真实驱动器收到边沿且故障确实消失后，会回到
+         * SwitchOnDisabled。stuck_fault 用来模拟"边沿发了但故障还在"。 */
+        case 128: if (!stuck_fault) servo[i][DEV_DICT_ROLE_STATUS_WORD] = 0x40; break;
         }
         servo[i][DEV_DICT_ROLE_MODE_DISPLAY] = servo[i][DEV_DICT_ROLE_OP_MODE];
     }
@@ -131,6 +136,11 @@ int Master_ServoStep(int slot, Ds402Request req, uint16_t mode, uint16_t* out) {
         return Master_ServoWrite(slot, DEV_DICT_ROLE_CONTROL_WORD, s.control_word);
     return 0;
 }
+int Master_BusHealth(MasterBusHealth* out) {
+    if (!out) return -1;
+    *out = health;
+    return 0;
+}
 int Master_IoReadEntry(int slot, int index, uint32_t* out, int* bits) {
     ++reads;
     if (fail_read) return -1;
@@ -147,7 +157,8 @@ int Master_IoWriteEntry(int slot, int index, uint32_t value) {
 static HalCConfig config(void) {
     HalCConfig c = {0};
     c.abi_major = HAL_C_ABI_MAJOR; c.abi_minor = HAL_C_ABI_MINOR; c.struct_size = sizeof(c);
-    c.cycle_us = 1000; c.start_timeout_ms = 120000; c.cycle_timeout_ms = 2000; c.dc_enable = 1;
+    c.cycle_us = 1000; c.start_timeout_ms = 120000; c.cycle_timeout_ms = 2000;
+    c.fault_reset_timeout_ms = 2000; c.dc_enable = 1;
     c.axis_count = 1;
     HalCAxisCfg* a = &c.axes[0];
     a->axis_index = 1; a->logical_axis = 7; a->estop_action = HAL_ESTOP_DISABLE_OPERATION;
@@ -674,9 +685,92 @@ static void angle_regressions(void) {
     hal_context_destroy(c);
 }
 
+static void fault_reset_and_bus_health(void) {
+    /* ---- 总线健康：HAL 只搬运不判断，逐字段核对映射 ---- */
+    memset(&health, 0, sizeof(health));
+    health.pdo_warn = 1; health.pdo_warn_code = 7; health.pdo_warn_para = 0x1234;
+    health.dc_warn = 1; health.dc_warn_code = 9; health.dc_warn_para = 0x5678;
+    health.crc_err_count = 11; health.frame_timeout_count = 22;
+    health.expect_wkc_tx = 33; health.expect_wkc_rx = 44;
+
+    HalCConfig cfg = config();
+    HalContext* c = create(&cfg);
+    CHECK(hal_context_start(c, NULL, 0) == 0);
+
+    HalCBusHealth h;
+    CHECK(hal_bus_health(c, &h) == HAL_OK);
+    CHECK(h.pdo_warn == 1 && h.pdo_warn_code == 7 && h.pdo_warn_para == 0x1234);
+    CHECK(h.dc_warn == 1 && h.dc_warn_code == 9 && h.dc_warn_para == 0x5678);
+    CHECK(h.crc_error_count == 11 && h.frame_timeout_count == 22);
+    CHECK(h.expect_wkc_tx == 33 && h.expect_wkc_rx == 44);
+    CHECK(hal_bus_health(NULL, &h) == HAL_ERROR_ARGUMENT);
+    CHECK(hal_bus_health(c, NULL) == HAL_ERROR_ARGUMENT);
+
+    /* ---- 故障复位：请求 → 边沿 → 反馈离开 Fault → DONE ---- */
+    int32_t st = -1;
+    CHECK(hal_rt_axis_fault_reset_state(c, 7, &st) == 0 && st == HAL_RESET_NONE);
+    CHECK(hal_rt_axis_fault_reset_state(c, 999, &st) == HAL_ERROR_ARGUMENT);
+
+    cycle(c);
+    /* 把轴推进故障态：状态字置 Fault 位（bit3）。控制字设成 commit 不处理的值，
+     * 免得被它按控制字重算状态字覆盖掉。 */
+    servo[1][DEV_DICT_ROLE_STATUS_WORD] = 0x0008;   /* 轴 7 绑 slots[1]，不是 slots[0] */
+    servo[1][DEV_DICT_ROLE_CONTROL_WORD] = 0xFF;
+    begin(c);
+    HalCAxisStatus s;
+    CHECK(hal_rt_axis_read_status(c, 7, &s) == 0 && (s.raw_status & 0x0008u));
+
+    /* 只允许在 begin 与 commit 之间受理（request 只有周期线程能写） */
+    CHECK(hal_rt_axis_fault_reset(c, 7) == 0);
+    CHECK(hal_rt_axis_fault_reset_state(c, 7, &st) == 0 && st == HAL_RESET_PENDING);
+    /* 复位期间不能写位置：request 不是 ENABLE，motion_ready 为假 */
+    CHECK(hal_rt_axis_write_pos(c, 7, 10) == HAL_ERROR_NOT_RUNNING);
+    CHECK(hal_rt_commit_cycle(c) == 0);
+
+    /* 下一拍 begin 才发出 0x80 边沿，该拍 commit 里 mock 让驱动器离开 Fault */
+    cycle(c);
+    /* 再下一拍 begin 采样到已离开 Fault → DONE，且请求被改成 DISABLE */
+    begin(c);
+    CHECK(hal_rt_axis_fault_reset_state(c, 7, &st) == 0 && st == HAL_RESET_DONE);
+    CHECK(hal_rt_axis_read_status(c, 7, &s) == 0 && !s.enabled);
+    CHECK(hal_rt_commit_cycle(c) == 0);
+    hal_context_destroy(c);
+
+    /* 阶段外调用被拒 */
+    c = create(&cfg);
+    CHECK(hal_context_start(c, NULL, 0) == 0);
+    CHECK(hal_rt_axis_fault_reset(c, 7) == HAL_ERROR_STATE);
+    hal_context_destroy(c);
+
+    /* ---- 超时：边沿发了但故障一直不消失 ---- */
+    stuck_fault = 1;
+    HalCConfig cfg2 = config();
+    cfg2.fault_reset_timeout_ms = 4;   /* 4ms ÷ 1ms 周期 = 4 拍 */
+    HalContext* c2 = create(&cfg2);
+    CHECK(hal_context_start(c2, NULL, 0) == 0);
+    cycle(c2);
+    servo[1][DEV_DICT_ROLE_STATUS_WORD] = 0x0008;
+    servo[1][DEV_DICT_ROLE_CONTROL_WORD] = 0xFF;
+    begin(c2);
+    CHECK(hal_rt_axis_fault_reset(c2, 7) == 0);
+    CHECK(hal_rt_commit_cycle(c2) == 0);
+    st = HAL_RESET_PENDING;
+    for (int i = 0; i < 10 && st == HAL_RESET_PENDING; ++i) {
+        begin(c2);
+        CHECK(hal_rt_axis_fault_reset_state(c2, 7, &st) == 0);
+        CHECK(hal_rt_commit_cycle(c2) == 0);
+    }
+    CHECK(st == HAL_RESET_TIMEOUT);
+    /* 超时同样必须留在未使能态 */
+    CHECK(hal_rt_axis_read_status(c2, 7, &s) == 0 && !s.enabled);
+    stuck_fault = 0;
+    hal_context_destroy(c2);
+}
+
 int main(void) {
     lifecycle(); binding(); optional_capabilities(); motion_io(); wrap_and_faults();
     stop_overrides_staged_enable(); concurrent_stop();
     preset_overflow_probe(); spindle_origin_angle(); angle_regressions();
+    fault_reset_and_bus_health();
     printf("context_regression: %u checks passed\n", checks);
 }

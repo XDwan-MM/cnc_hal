@@ -20,7 +20,9 @@
 
 #include <stdint.h>
 
-#define HAL_C_ABI_MAJOR  3u
+/* 4.0：新增故障复位与总线健康查询两个公共函数（函数增按本文件的策略是 MAJOR），
+ * 并新增 HalCConfig.fault_reset_timeout_ms 字段。 */
+#define HAL_C_ABI_MAJOR  4u
 #define HAL_C_ABI_MINOR  0u
 
 #define HAL_C_MAX_DEV     30u   /* 轴 / IO / 面板 各自的容量上限 */
@@ -135,6 +137,8 @@ typedef struct {
     uint32_t cycle_us;
     uint32_t start_timeout_ms;          /* 整个启动过程共用的总预算 */
     uint32_t cycle_timeout_ms;
+    uint32_t fault_reset_timeout_ms;    /* 故障复位从发起算起的等待上限（ms），必须 > 0。
+                                           超过即判 HAL_RESET_TIMEOUT 并把该轴留在未使能态。 */
     int32_t  dc_enable;                 /* 0 或 1；运行期间配置不可变 */
 
     /* ---- 设备数组，前 count 个有效 ---- */
@@ -191,3 +195,23 @@ typedef struct {
     int32_t axis_count;                 /* 已装配的物理轴数 */
     HalCIdentity identity;
 } HalCSlaveInfo;
+
+/* 总线健康快照（出参）。
+ *
+ * **只记录不判断**——这里给的是原始计数与标志，什么算异常、要不要报警由上层决定。
+ * 对应旧 RT 的 PdoWar_Info_Get() + Master_Hardware_Error 那条链：旧代码把 CRC 错误
+ * 和帧超时直接映射成 ALARM_ETHCAT_SV，HAL 不做这个映射。
+ *
+ * 全部为累计/瞬时原始值，未做任何单位换算。还没收过帧时全零。 */
+typedef struct {
+    int32_t  pdo_warn;                  /* 非零 = 最近一帧有 PDO 警告 */
+    int32_t  pdo_warn_code;             /* PDO 警告号 */
+    uint32_t pdo_warn_para;             /* 警告参数 */
+    int32_t  dc_warn;                   /* 非零 = 有分布式时钟警告 */
+    int32_t  dc_warn_code;
+    uint32_t dc_warn_para;
+    uint32_t crc_error_count;           /* CRC 错误累计次数 */
+    uint32_t frame_timeout_count;       /* 帧超时累计次数 */
+    uint32_t expect_wkc_tx;             /* 期望工作计数器（Tx 侧） */
+    uint32_t expect_wkc_rx;             /* 期望工作计数器（Rx 侧） */
+} HalCBusHealth;

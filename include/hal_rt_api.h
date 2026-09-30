@@ -93,6 +93,36 @@ int32_t hal_rt_axis_write_pos(HalContext* c, HalAxisId id, double pos);
 int32_t hal_rt_axis_read_pos(HalContext* c, HalAxisId id, double* pos);
 
 /**
+ * @brief 请求清除驱动器的故障（DS402 Fault Reset）
+ *
+ * 非阻塞：只置意图，真正的控制字边沿（0x0080）由之后的 hal_rt_begin_cycle 产生。
+ * 边沿在状态字仍带 Fault 位（0x0008）时每拍重发，直到驱动器离开 Fault 或超时
+ * （配置的 fault_reset_timeout_ms）。
+ *
+ * **终态一律是未使能**——不论成功、超时还是中途被急停打断，轴都不会自动恢复使能。
+ * 要重新运动必须显式 hal_rt_axis_enable()，且要再经一次 begin 确认状态机到位。
+ * 这是有意的：驱动器刚从故障恢复时自动上使能是危险的。
+ *
+ * 幂等：重复调用等于刷新一次请求（超时重新计时）。
+ * 急停优先：请求复位期间调 hal_rt_axis_estop() 会覆盖它，安全路径不被复位流程挡住。
+ *
+ * @param c  已 start 的 context
+ * @param id 逻辑轴号
+ * @return int32_t 0 = 成功；HAL_ERROR_STATE = 不在 begin 与 commit 之间；其余见文件头
+ */
+int32_t hal_rt_axis_fault_reset(HalContext* c, HalAxisId id);
+
+/**
+ * @brief 查故障复位的进展
+ *
+ * @param c   已 start 的 context
+ * @param id  逻辑轴号
+ * @param out 带出 HAL_RESET_* 之一（见 hal_config_api.h）
+ * @return int32_t 0 = 成功；其余见文件头
+ */
+int32_t hal_rt_axis_fault_reset_state(const HalContext* c, HalAxisId id, int32_t* out);
+
+/**
  * @brief 读最近一次采样的轴状态
  *
  * @param c   已 start 的 context
