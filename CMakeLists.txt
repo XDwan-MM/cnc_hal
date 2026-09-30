@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
-project(cnc_hal VERSION 1.1 LANGUAGES C)
+project(cnc_hal VERSION 3.0 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -33,7 +33,7 @@ target_link_options(cnc_hal PRIVATE
     "LINKER:--no-undefined"
     "LINKER:--version-script=${CMAKE_CURRENT_SOURCE_DIR}/cmake/hal.exports")
 set_property(TARGET cnc_hal APPEND PROPERTY LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/cmake/hal.exports")
-set_target_properties(cnc_hal PROPERTIES VERSION 1.1 SOVERSION 1)
+set_target_properties(cnc_hal PROPERTIES VERSION 3.0 SOVERSION 3)
 
 option(HAL_BUILD_STATIC "Build the HAL static library" OFF)
 if(HAL_BUILD_STATIC)

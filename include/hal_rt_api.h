@@ -39,7 +39,9 @@ int32_t hal_rt_wait_cycle(HalContext* c);
  * 也在这一拍补发。
  *
  * @param c 已 start 的 context
- * @return int32_t 0 = 成功；HAL_ERROR_STATE = 未先 wait；其余见文件头
+ * @return int32_t 0 = 成功；HAL_ERROR_STATE = 未先 wait；
+ *         HAL_ERROR_ARGUMENT = 非同一计数坐标系的预置值超出 int32；
+ *         此时未写本拍控制 PDO，调用方应停止周期并处置配置。
  */
 int32_t hal_rt_begin_cycle(HalContext* c);
 
@@ -201,14 +203,22 @@ int32_t hal_rt_spindle_estop(HalContext* c, HalAxisId id);
 int32_t hal_rt_spindle_request_mode(HalContext* c, HalAxisId id, HalSpindleMode mode);
 
 /**
- * @brief 在 CSP 模式下下发主轴角度（度）
+ * @brief 在 CSP 模式下下发相对既定零点的主轴单圈刻度（度）
  *
- * 刚性攻丝就是走这条路下发角度，所以主轴必须在配置里带有效逻辑轴号。
- * 受理条件同 hal_rt_axis_write_pos。
+ * 对“上电位置为 0°”的主轴，调用方应在启动后首次采样成功且尚未运动时，
+ * 调用 hal_rt_axis_set_pos(c, id, 0) 建立本次运行的零点；不依赖驱动器
+ * 是否已经把原始位置 PDO 清零。
+ * 普通目标位于 [-360, 360]：正数沿正向、负数沿反向到达该刻度；0
+ * 取最近的零刻度。方向从上一条已受理目标计算，切入 CSP 时该目标预置为
+ * 当前位置；取消运动后再次就绪时也从当时反馈重建基准。连续重复普通目标
+ * 不会再转一圈（设零或通用累计位置写入会重置重复判定）；+360/-360 是分别正转/反转
+ * 完整一圈的命令，重复调用会重复转圈。
+ * 此接口不生成运动轨迹；速度和加速度控制由上层负责。受理条件同
+ * hal_rt_axis_write_pos。
  *
  * @param c   已 start 的 context
  * @param id  逻辑轴号，且必须是主轴
- * @param deg 目标角度（度）；HAL 不做取模，累计转角可直接连续下发
+ * @param deg 相对既定零点的刻度（度），范围 [-360, 360]；符号指定方向
  * @return int32_t 0 = 成功；其余见文件头
  */
 int32_t hal_rt_spindle_write_pos(HalContext* c, HalAxisId id, double deg);

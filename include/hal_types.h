@@ -20,8 +20,8 @@
 
 #include <stdint.h>
 
-#define HAL_C_ABI_MAJOR  2u
-#define HAL_C_ABI_MINOR  3u
+#define HAL_C_ABI_MAJOR  3u
+#define HAL_C_ABI_MINOR  0u
 
 #define HAL_C_MAX_DEV     30u   /* 轴 / IO / 面板 各自的容量上限 */
 #define HAL_C_MAX_SPINDLE 4u    /* 主轴容量上限（一台机床几根就够） */
@@ -57,8 +57,8 @@ typedef struct {
  * 用宏而不是 enum：C 的 enum 底层宽度由实现定义，不适合跨 ABI。 */
 #define HAL_WORK_POSITION     1   /* 位置增量模式（CSP） */
 #define HAL_WORK_VELOCITY     3   /* 速度模式（CSV） */
-#define HAL_ENC_INCREMENTAL_Z 1   /* 增量式、有 Z 脉冲 → 上电必须回零 */
-#define HAL_ENC_ABSOLUTE      3   /* 绝对式、无 Z 脉冲 */
+#define HAL_ENC_INCREMENTAL_Z 1   /* 增量式、带 Z 相；是否回零由机床策略决定 */
+#define HAL_ENC_ABSOLUTE      3   /* 绝对式 */
 #define HAL_WRAP_LINEAR       0   /* 线性计数 */
 #define HAL_WRAP_MODULAR      1   /* 模循环（主轴：模每转脉冲数） */
 
@@ -102,8 +102,7 @@ typedef struct {
 /* 主轴 —— 在通用轴属性之上加转速侧的几个量。
  * 单独一张表，不塞进 axes[]：主轴的固有属性和进给轴不同（转速窗口、定向、
  * 运行期 CSV↔CSP 切换），混在一起会把轴表越弄越脏。
- * @note axis.logical_axis **必须 >= 0** —— 主轴要用 HalAxisId 寻址（刚硬攻丝时
- *       还要走 hal_rt_axis_write_pos 下发角度）。 */
+ * @note axis.logical_axis **必须 >= 0** —— 主轴角度接口也用 HalAxisId 寻址。 */
 typedef struct {
     HalCAxisCfg axis;                   /* 通用属性全在这，不重复 */
     double      max_speed;              /* rpm */

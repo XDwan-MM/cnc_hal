@@ -27,7 +27,7 @@ int main(void) {
     char err[128];
     assert(hal_config_validate(&c, err, sizeof(err)) == HAL_OK && !err[0]);
     assert(hal_config_validate(NULL, err, 1) == HAL_ERROR_ARGUMENT && !err[0]);
-    c.abi_minor = HAL_C_ABI_MINOR - 1;
+    c.abi_minor = HAL_C_ABI_MINOR + 1;
     assert(hal_config_validate(&c, NULL, 0) == HAL_ERROR_ABI);
     c = good(); c.struct_size--;
     assert(hal_config_validate(&c, NULL, 0) == HAL_ERROR_ABI);
