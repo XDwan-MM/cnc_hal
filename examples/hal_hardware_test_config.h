@@ -18,7 +18,7 @@ typedef struct {
     int speed_pdo_units_confirmed;  /* 已核对驱动速度 PDO 的单位与 HAL 的 counts/s 假设一致。 */
     double rpm;                     /* 获批的低速试转目标，单位 rpm，必须小于配置的 max_speed。 */
     double speed_tolerance;         /* 转速到位及停转判定的允许误差，单位 rpm。 */
-    double angle_target;            /* CSP 用例先把静止当前位置标为 0°，再下发此测试坐标系中的目标角度，单位 deg。 */
+    double angle_target;            /* CSP 用例相对测试零点的刻度，[-360,360]；符号指定到达方向。 */
     double max_angle_step;          /* 本次允许的最大角位移，单位 deg；不是速度限制。 */
     double angle_tolerance;         /* 角度到位允许误差，单位 deg。 */
 } HalSpindleHardwareCase;

@@ -68,7 +68,7 @@ int hal_hardware_test_config(HalCConfig* config, HalHardwareTestSettings* settin
           config->axes[i].enc_off = 150;
      }
      config->spindles[0].axis.estop_action = HAL_ESTOP_DISABLE_VOLTAGE; // 同样必须显式选择
-     config->spindles[0].axis.encoder_type = HAL_ENC_ABSOLUTE;
+     config->spindles[0].axis.encoder_type = HAL_ENC_INCREMENTAL_Z;
      config->spindles[0].axis.feedback_pulses_per_rev = 100000;
      config->spindles[0].axis.command_units_per_count = 0.16; // deg/count
      config->spindles[0].axis.feedback_units_per_count = 0.16; // deg/count
@@ -90,7 +90,7 @@ int hal_hardware_test_config(HalCConfig* config, HalHardwareTestSettings* settin
      settings->spindle.speed_pdo_units_confirmed = 1; // 速度 PDO 确认为 counts/s
      settings->spindle.rpm = 1000;              // 批准的低速正/反转目标
      settings->spindle.speed_tolerance = 20;  // rpm
-     settings->spindle.angle_target = 360;     // deg，本用例把静止当前位置设为 0° 后的目标
+     settings->spindle.angle_target = 360;     // deg，特殊命令：从当前位置正转完整一圈
      settings->spindle.max_angle_step = 360;   // deg
      settings->spindle.angle_tolerance = 5;  // deg
      

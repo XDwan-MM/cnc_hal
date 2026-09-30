@@ -485,6 +485,7 @@ failed:
 static int spindle_angle_case(Runner* r) {
     const HalSpindleHardwareCase* s = &r->settings->spindle;
     if (!s->scaling_confirmed || !isfinite(s->angle_target) ||
+        s->angle_target < -360.0 || s->angle_target > 360.0 ||
         !isfinite(s->max_angle_step) || s->max_angle_step <= 0 ||
         !isfinite(s->angle_tolerance) || s->angle_tolerance < 0 ||
         !r->settings->settle_cycles) {
@@ -497,12 +498,8 @@ static int spindle_angle_case(Runner* r) {
     }
     HalCSpindleStatus state;
     if (spindle_snapshot(r, &state)) return -1;
-    printf("SPINDLE raw startup position=%.6f deg; test target=%.6f deg; max_step=%.6f deg\n",
+    printf("SPINDLE raw startup position=%.6f deg; requested angle=%.6f deg; max_step=%.6f deg\n",
            state.position_deg, s->angle_target, s->max_angle_step);
-    if (fabs(s->angle_target) > s->max_angle_step) {
-        fprintf(stderr, "角度目标相对测试零点超出 max_angle_step\n");
-        return -1;
-    }
     if (prompt("确认主轴静止；将当前位置临时标为本次测试的 0 度，随后测试 CSP 小角度目标")) return -1;
     if (call("hal_rt_axis_set_pos(spindle, 0 deg)",
              hal_rt_axis_set_pos(r->ctx, 0, 0.0))) return -1;
@@ -524,23 +521,34 @@ static int spindle_angle_case(Runner* r) {
         fprintf(stderr, "主轴未在规定周期内进入 CSP 使能状态\n");
         goto failed;
     }
-    if (fabs(s->angle_target - state.position_deg) > s->max_angle_step) {
-        fprintf(stderr, "使能后角度目标相对当前位置超出 max_angle_step: "
-                "current=%.6f target=%.6f limit=%.6f\n",
-                state.position_deg, s->angle_target, s->max_angle_step);
-        goto failed;
-    }
     if (prompt("主轴已在 CSP 使能且静止；输入 YES 下发目标角度")) goto failed;
     if (begin_tick(r)) goto failed;
     int rc = hal_rt_spindle_write_pos(r->ctx, 0, s->angle_target);
+    double expected = 0.0;
+    if (!rc) {
+        /* 写接口只暂存目标：同一拍读取真正生成的累计目标，再决定是否提交。 */
+        HalCAxisStatus axis;
+        rc = hal_rt_axis_read_status(r->ctx, 0, &axis);
+        if (!rc) {
+            expected = axis.command_pos;
+            const double delta = expected - axis.actual_pos;
+            if (!isfinite(delta) || fabs(delta) > s->max_angle_step) {
+                fprintf(stderr, "实际暂存转角超出 max_angle_step: "
+                        "current=%.6f target=%.6f delta=%.6f limit=%.6f\n",
+                        axis.actual_pos, expected, delta, s->max_angle_step);
+                rc = HAL_ERROR_ARGUMENT;
+            }
+        }
+    }
+    /* 超限先取消暂存位置，再提交停机指令，不能把超限目标发送到驱动器。 */
     if (rc) (void)hal_rt_spindle_estop(r->ctx, 0);
     int committed = end_tick(r);
-    if (call("hal_rt_spindle_write_pos", rc) || committed) goto failed;
+    if (call("hal_rt_spindle_write_pos/angle limit", rc) || committed) goto failed;
     for (unsigned i = 0; i < r->settings->settle_cycles; ++i) {
         if (spindle_snapshot(r, &state)) goto failed;
-        printf("SPINDLE angle=%.6f target=%.6f mode=%d sw=0x%04x\n",
-               state.position_deg, s->angle_target, state.mode, state.raw_status);
-        if (fabs(state.position_deg - s->angle_target) <= s->angle_tolerance) {
+        printf("SPINDLE angle=%.6f expected=%.6f mode=%d sw=0x%04x\n",
+               state.position_deg, expected, state.mode, state.raw_status);
+        if (fabs(state.position_deg - expected) <= s->angle_tolerance) {
             (void)hal_rt_spindle_estop(r->ctx, 0);
             if (tick(r)) return -1;
             return prompt("确认主轴实际转角与记录一致，且已经停稳");
