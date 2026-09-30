@@ -1,0 +1,4 @@
+{
+    global: hal_*;
+    local: *;
+};

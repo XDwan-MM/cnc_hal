@@ -1,0 +1,38 @@
+// 设备字典 v1 —— 按 (vendor_id, product_code, revision) 匹配。
+//
+// 本文件是 device.h 里 device_type_library[] 那张硬编码表的等价转换。
+// revision 暂时保留原表的**精确值**，行为与转换前一致；要放宽的条目
+// 自行改成 "*"（devdict 支持通配）。
+//
+// type 取值（对应 DEVICE_TYPE 枚举）：
+//   "servo"  通用 DS402 伺服
+//   "gree6"  格力 axis6 自研驱动
+//   "gree4"  格力 axis4 自研驱动
+//   "panel"  控制面板（与 IO 模块同构）
+//   "io"     IO 模块
+//
+// profile 取值（对象映射策略，只有 custom 能写 objects）：
+//   "ds402"  用内置标准 DS402 对象号
+//   "custom" 用本条的 objects 段（见 devdict.h）
+//   "none"   本字典不提供对象映射——面板/IO 按位置建句柄，非标多轴在代码里
+//
+// 注意：非标多轴（gree6/gree4）目前是 profile=none，对象映射仍硬编码在
+// device.c 的 servo_addr_axis6_config / servo_addr_axis4_config 里。
+// 这是有意为之——多轴的对象号按轴偏移，现有字典格式表达不了。
+
+{
+  "version": 1,
+  "devices": [
+    { "vendor_id": 441,        "product_code": 2,          "revision": 0,         "type": "servo", "profile": "ds402", "name": "Sanyo Servo Driver" },
+    { "vendor_id": 477,        "product_code": 271601776,  "revision": 33818120,  "type": "servo", "profile": "ds402", "name": "Delta Servo Driver" },
+    { "vendor_id": 1647,       "product_code": 1614282758, "revision": 65536,     "type": "servo", "profile": "ds402", "name": "Panasonic Servo Driver" },
+    { "vendor_id": 2252,       "product_code": 6,          "revision": 0,         "type": "gree6", "profile": "none",  "name": "Gree axis6 Servo Driver" },
+    { "vendor_id": 2973639698, "product_code": 1,          "revision": 0,         "type": "gree4", "profile": "none",  "name": "Gree axis4 Servo Driver" },
+    { "vendor_id": 2252,       "product_code": 269418498,  "revision": 1,         "type": "panel", "profile": "none",  "name": "Control Panel Module" },
+    { "vendor_id": 2252,       "product_code": 269418497,  "revision": 1,         "type": "io",    "profile": "none",  "name": "IO Module" },
+    { "vendor_id": 1717,       "product_code": 1026,       "revision": 268435457, "type": "servo", "profile": "ds402", "name": "GHSD" },
+    { "vendor_id": 1710,       "product_code": 131073,     "revision": 65536,     "type": "servo", "profile": "ds402", "name": "SPS_ECAT_CoE_02" },
+    { "vendor_id": 1337,       "product_code": 35652353,   "revision": 268435456, "type": "servo", "profile": "ds402", "name": "SGD7S" },
+    { "vendor_id": 2252,       "product_code": 2973639698, "revision": 1,         "type": "gree4", "profile": "none",  "name": "Gree axis4 Servo Driver" }
+  ]
+}
