@@ -311,11 +311,21 @@ static void motion_io(void) {
     CHECK(hal_rt_spindle_write_speed(c, 3, 10, -1) == 0);
     CHECK(hal_rt_commit_cycle(c) == 0);
     CHECK(servo[1][DEV_DICT_ROLE_TARGET_POS] == (uint32_t)-250);
-    CHECK(servo[0][DEV_DICT_ROLE_TARGET_SPEED] == (uint32_t)-120);
+    /* 速度 PDO 与 rpm 是 1:1：指令 10 rpm、dir=-1，写进 PDO 的就该是 -10。
+     * 此前按 counts/s 假设会写成 10*(-1)*6/0.5 = -120。 */
+    CHECK(servo[0][DEV_DICT_ROLE_TARGET_SPEED] == (uint32_t)-10);
     CHECK(output[2][0] == 5 && output[2][1] == 0xAD5 && output[3][0] == 0x1AA);
-    servo[0][DEV_DICT_ROLE_ACTUAL_SPEED] = (uint32_t)-240;
-    begin(c);
     HalCSpindleStatus s;
+    /* 读侧同样 1:1：喂一个 counts/s 换算得不出来的值，证明没偷偷乘当量。
+     * 反馈当量 .25，旧式 -1234*.25/6 会得到 -51。 */
+    servo[0][DEV_DICT_ROLE_ACTUAL_SPEED] = (uint32_t)-1234;
+    begin(c);
+    CHECK(hal_rt_spindle_read_status(c, 3, &s) == 0 && s.actual_speed == -1234 && !s.at_speed);
+    /* 贴近指令时 at_speed 置位：指令 -10 rpm，转速窗口 .5。
+     * 上一拍已 begin 未 commit，必须先提交才能进下一次 wait。 */
+    CHECK(hal_rt_commit_cycle(c) == 0);
+    servo[0][DEV_DICT_ROLE_ACTUAL_SPEED] = (uint32_t)-10;
+    begin(c);
     CHECK(hal_rt_spindle_read_status(c, 3, &s) == 0 && s.actual_speed == -10 && s.at_speed);
     CHECK(hal_rt_spindle_request_mode(c, 3, HAL_SPINDLE_CSP) == 0);
     CHECK(hal_rt_spindle_write_speed(c, 3, 10, 1) == HAL_ERROR_NOT_RUNNING);

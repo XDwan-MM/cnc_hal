@@ -87,7 +87,7 @@ int hal_hardware_test_config(HalCConfig* config, HalHardwareTestSettings* settin
           settings->feed[i].offset_test_delta = 1;
      }
      settings->spindle.scaling_confirmed = 1; // deg/count 及方向已核实
-     settings->spindle.speed_pdo_units_confirmed = 1; // 速度 PDO 确认为 counts/s
+     settings->spindle.speed_pdo_units_confirmed = 1; // 速度 PDO 确认为 rpm（与 HAL 现在的 1:1 约定一致）
      settings->spindle.rpm = 1000;              // 批准的低速正/反转目标
      settings->spindle.speed_tolerance = 20;  // rpm
      settings->spindle.angle_target = 360;     // deg，特殊命令：从当前位置正转完整一圈

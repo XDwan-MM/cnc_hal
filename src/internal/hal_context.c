@@ -519,7 +519,13 @@ static int sample_axis(Axis* a) {
     a->speed.enabled = a->status.enabled;
     a->speed.raw_status = (uint16_t)sw;
     a->speed.position_deg = a->status.actual_pos;
-    a->speed.actual_speed = a->has_speed ? signed32(velocity) * feedback_scale(a) / 6.0 : 0;
+    /* 速度 PDO 的单位假定为 rpm，不做任何当量换算——直接就是转速。
+     * 2026-09-30 更正：此前按 counts/s 换算（× 反馈当量 ÷ 6），是错的。
+     * 以台架主轴当量 0.16 deg/count 为例，那个假设会让读侧把 1000 rpm 报成
+     * 26.7 rpm、写侧把 37.5 倍放大（见 docs/rt-interface.md 的说明）。
+     * 注意：若某台驱动器的速度对象单位是 0.1 rpm（不少驱动默认如此），这里
+     * 还要再乘 10 —— 换机器前先核对对象字典。 */
+    a->speed.actual_speed = a->has_speed ? signed32(velocity) : 0;
     if (!isfinite(a->status.actual_pos) || !isfinite(a->speed.actual_speed)) return HAL_ERROR_BUS;
     a->speed.at_speed = a->spindle && a->status.enabled && mode == DS402_MODE_CSV &&
         fabs(a->speed.actual_speed - a->speed.command_speed) <= a->spindle_cfg.speed_window;
@@ -762,7 +768,9 @@ int32_t hal_rt_spindle_write_speed(HalContext* c, HalAxisId id, double rpm, int3
     if (!isfinite(rpm) || rpm < 0 || rpm > a->spindle_cfg.max_speed || dir < -1 || dir > 1) return HAL_ERROR_ARGUMENT;
     if (c->phase != 2 || !a->motion_ready || !a->status.enabled || a->request != DS402_REQ_ENABLE ||
         a->desired_mode != DS402_MODE_CSV || a->mode != DS402_MODE_CSV) return HAL_ERROR_NOT_RUNNING;
-    rc = to_counts(rpm * dir * 6.0 / command_scale(a), &a->speed_command);
+    /* 与读侧同一约定：速度 PDO 就是 rpm，不做当量换算。
+     * to_counts 会四舍五入到整数——驱动器速度单位若比 1 rpm 更细，精度在这里丢失。 */
+    rc = to_counts(rpm * dir, &a->speed_command);
     if (rc) return rc;
     a->speed_dirty = 1;
     a->speed.command_speed = rpm * dir;

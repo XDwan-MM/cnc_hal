@@ -15,7 +15,7 @@ typedef struct {
 
 typedef struct {
     int scaling_confirmed;          /* 主轴角度的命令/反馈当量及方向已核实，未确认则禁止角度运动。 */
-    int speed_pdo_units_confirmed;  /* 已核对驱动速度 PDO 的单位与 HAL 的 counts/s 假设一致。 */
+    int speed_pdo_units_confirmed;  /* 已核对驱动速度 PDO 的单位与 HAL 的 rpm 假设一致（即对象字典里就是 rpm，不是 0.1 rpm）。 */
     double rpm;                     /* 获批的低速试转目标，单位 rpm，必须小于配置的 max_speed。 */
     double speed_tolerance;         /* 转速到位及停转判定的允许误差，单位 rpm。 */
     double angle_target;            /* CSP 用例相对测试零点的刻度，[-360,360]；符号指定到达方向。 */
