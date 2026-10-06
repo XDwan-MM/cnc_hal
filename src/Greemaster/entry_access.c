@@ -57,7 +57,12 @@ MASTER_API int Master_ServoWrite(int slot, DevDictRole role, uint32_t value) {
     return (GM_RxPdoEntry_Write(*h, value) != 0) ? -1 : 0;
 }
 
-/* 词设备的有效词数与种类（面板 / IO 模块的 union 成员不同）。 */
+/* 词设备的有效词数与种类（面板 / IO 模块的 union 成员不同）。
+ *
+ * 注意这一层存在**两个来源**：数量取自 DeviceTable 里的快照（DeviceTable_Build
+ * 把 g_device_data[slot] 整份拷进 DeviceSlot.entries），而下面的读写句柄直接取
+ * g_device_data[slot]。今天两者一致，但任何一处改了而另一处没跟上就会静默错位——
+ * 正是这一层最怕的「整体错位而且不报错」。改动时务必同时看这两处。 */
 static int io_info(int slot, int* out_n, int* in_n, int* is_panel) {
     const DeviceSlot* slots = NULL;
     const int n = DeviceTable_Get(&slots);

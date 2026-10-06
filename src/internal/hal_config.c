@@ -2,6 +2,11 @@
 #include <math.h>
 #include <stdio.h>
 
+/* X/Y 是 PLC 的**字节**地址域。给个上界：手滑填一个很大的数会让映像长度涨到
+ * GB 级，调用方按 hal_io_image_size() 的返回值分配时就是一次巨型分配。
+ * 64 KiB 远超实际需要（示例用 0/256，实时端用 0..511）。 */
+#define HAL_MAX_IO_BYTE_ADDR 65535
+
 static int32_t fail(char* err, uint32_t len, int32_t code, const char* text) {
     if (err && len) snprintf(err, len, "%s", text);
     return code;
@@ -65,7 +70,8 @@ int32_t hal_config_validate(const HalCConfig* c, char* err, uint32_t len) {
         const int slave = panel ? c->panels[index].slave_pos : c->ios[index].slave_pos;
         const int x = panel ? c->panels[index].x_start : c->ios[index].x_start;
         const int y = panel ? c->panels[index].y_start : c->ios[index].y_start;
-        if (slave < 0 || slave >= (int)HAL_C_MAX_DEV || x < 0 || y < 0)
+        if (slave < 0 || slave >= (int)HAL_C_MAX_DEV ||
+            x < 0 || x > HAL_MAX_IO_BYTE_ADDR || y < 0 || y > HAL_MAX_IO_BYTE_ADDR)
             return fail(err, len, HAL_ERROR_CONFIG, "IO 或面板地址无效");
         for (int j = 0; j < count; ++j)
             if (axis_at(c, j)->slave_pos == slave)

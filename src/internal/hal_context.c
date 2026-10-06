@@ -90,8 +90,10 @@ struct HalContext {
     Io   ios[HAL_C_MAX_DEV];    /* 前 io_count 个有效 */
 };
 
-/* SDK 的主站是进程全局单例；所有 context 生命周期操作由调用方串行。 */
-static HalContext* owner;
+/* SDK 的主站是进程全局单例；所有 context 生命周期操作由调用方串行。
+ * 用原子指针：hal_context_request_stop() 允许与周期调用并发，它要读这个值，
+ * 而 start / stop 会写它。 */
+static _Atomic(HalContext*) owner;
 
 /* 统一的「填错误文本 + 返回码」出口，只用于非 RT 路径（RT 路径不碰 err 缓冲）。 */
 static int report(int code, char* err, uint32_t len, const char* detail) {
@@ -283,20 +285,20 @@ int32_t hal_context_create(const HalCConfig* config, HalContext** out, char* err
 int32_t hal_context_start(HalContext* c, char* err, uint32_t len) {
     if (err && len) err[0] = 0;
     if (!c) return report(HAL_ERROR_ARGUMENT, err, len, "context 为空");
-    if (owner) return report(HAL_ERROR_BUSY, err, len, "主站已被启动的 context 占用");
+    if (atomic_load(&owner)) return report(HAL_ERROR_BUSY, err, len, "主站已被启动的 context 占用");
     reset_runtime(c);
     atomic_store(&c->stop_requested, 0);
-    owner = c;
+    atomic_store(&owner, c);
     struct timespec started, ended;
     if (clock_gettime(CLOCK_MONOTONIC, &started) != 0) {
-        owner = NULL;
+        atomic_store(&owner, NULL);
         return report(HAL_ERROR_BUS, err, len, "无法读取启动时钟");
     }
     MasterConfig cfg = {c->config.cycle_us, c->config.start_timeout_ms,
                         c->config.cycle_timeout_ms, c->config.dc_enable};
     const int driver_rc = ethercat_init(&cfg);
     if (driver_rc != 0) {
-        owner = NULL;
+        atomic_store(&owner, NULL);
         if (driver_rc == MASTER_DEVICE_DICTIONARY_ERROR)
             return report(HAL_ERROR_CONFIG, err, len,
                           "设备字典加载失败：检查 CNC_HAL_DEVICES_JSON 或安装目录中的 devices.json");
@@ -379,7 +381,7 @@ int32_t hal_context_start(HalContext* c, char* err, uint32_t len) {
     return HAL_OK;
 bad:
     (void)ethercat_close();
-    owner = NULL;
+    atomic_store(&owner, NULL);
     reset_runtime(c);
     return report(result, err, len, detail);
 }
@@ -392,7 +394,7 @@ bad:
 int32_t hal_context_request_stop(HalContext* c) {
     if (!c) return HAL_ERROR_ARGUMENT;
     atomic_store(&c->stop_requested, 1);
-    if (owner == c) Master_RequestStop();
+    if (atomic_load(&owner) == c) Master_RequestStop();
     return HAL_OK;
 }
 
@@ -401,7 +403,7 @@ int32_t hal_context_stop(HalContext* c) {
     if (!c) return HAL_ERROR_ARGUMENT;
     atomic_store(&c->stop_requested, 1);
     int rc = 0;
-    if (owner == c) { rc = ethercat_close(); owner = NULL; }
+    if (atomic_load(&owner) == c) { rc = ethercat_close(); atomic_store(&owner, NULL); }
     reset_runtime(c);
     return rc ? HAL_ERROR_BUS : HAL_OK;
 }
