@@ -48,7 +48,7 @@ typedef struct{
 // 紧凑结构体 (禁止填充)
 typedef struct {
     unsigned short int type;      // 数据类型 (Word 1)
-    unsigned short int length;    // 数据内容长度 (Word 2)，注意：此值通常代表**字节数**
+    unsigned short int length;    // 数据内容长度 (Word 2)。**单位是 Word，不是字节**：字节数 = 该值 × 2
 } ECAT_EEPROM_CLASS_HEADER;
 
 // 1. PDO 头部结构

@@ -507,9 +507,9 @@ ReadyToSwitchOn (0x21)
       │  写 0x07 (Switch On)  ── 同时<b>必须</b>把目标位置设成当前位置（防飞车）
       ▼
 SwitchedOn (0x23)
-      │  写 0x0F (Enable Operation)
+      │  写 0x0F (Enable Operation)  ── 这一拍<b>也会</b>预置目标位置
       ▼
-OperationEnabled (0x237)   ← 到这儿才收位置/速度指令
+OperationEnabled (0x27)    ← 到这儿才收位置/速度指令
 </pre>
 
 <p><code>Ds402_NextStepReq()</code> 就是回答"这一拍该写什么"：给它状态字、当前模式、上层请求，

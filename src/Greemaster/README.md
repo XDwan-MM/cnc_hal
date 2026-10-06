@@ -4,7 +4,7 @@
 > 上使能前重新预置位置；HAL 运行层负责复位低/高脉冲；从站 DC 参数由启动配置传入。
 
 HAL 内部的主站驱动层。源码原本是封装侧的独立包（`DEMO_LIB_AUTO_0920`），2026-09-21
-被吸收进 HAL 工程并改造。**原始副本仍留在 `/home/mxh/CNC/DEMO_LIB_AUTO_0920` 作对照。**
+被吸收进 HAL 工程并改造。**原始副本目录已不在本机；要对照改造前的行为请查 git 历史。**
 
 这一层的职责：**把 EtherCAT 总线上的东西，变成 HAL 能消费的设备模型。**
 
@@ -169,7 +169,7 @@ custom 伺服必须提供实际模式 mode_display，对象位宽及收发方向
 
 ---
 
-## 五、对 HAL 的接口（15 个）
+## 五、对 HAL 的接口（16 个）
 
 本层**单独交付**时用 `export.h` 的 `MASTER_API` + 编译时 `-fvisibility=hidden`，
 把其余 70 多个内部符号全挡住。HAL 自身的库目标**不加**这个 flag——它靠
@@ -221,6 +221,7 @@ int  Master_ServoGetModeSwitch(int slot, Ds402ModeSwitch* out);
 // —— 伺服：按语义角色读写（进出的是硬件原始值，换算归上层）——
 int  Master_ServoRead (int slot, DevDictRole role, uint32_t* out);
 int  Master_ServoWrite(int slot, DevDictRole role, uint32_t value);
+int  Master_ServoHasRole(int slot, DevDictRole role);   // 该语义角色是否已绑定
 
 // —— 词设备（面板 / IO 模块）：按 Entry 序号读写 ——
 // Entry 位长 1~32，值右对齐；读要把位长带出来（HAL 打包字节图要用）
@@ -306,7 +307,7 @@ python3 test/run_driver_tests.py
 - DS402 纯函数、DeviceBase 状态迁移。
 
 已通过 ASan、UBSan 和泄漏检查。真实 SDK 的共享库链接检查通过，
-以隐藏可见性编译后仍只导出 15 个业务函数（不计 ELF 链接器标记）。
+以隐藏可见性编译后仍只导出 16 个业务函数（不计 ELF 链接器标记）。
 
 硬件上仍需验证握手、EEPROM 实际内容、Entry 绑定、收发与模式切换效果。
 超时公开为毫秒，按 SDK 头声明的整数秒向上取整。启动共用单调时钟截止时间，

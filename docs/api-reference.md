@@ -1575,17 +1575,21 @@ int32_t hal_rt_io_snapshot_inputs(HalContext *c, uint8_t *x_image, uint32_t x_le
 **示例用法**
 
 ```c
-uint8_t x_image[64];
-if (hal_rt_io_snapshot_inputs(ctx, x_image, sizeof(x_image)) != HAL_OK) {
+uint32_t x_size, y_size;
+if (hal_io_image_size(ctx, &x_size, &y_size) != HAL_OK) { /* 未 start */ }
+uint8_t* x_image = malloc(x_size);   /* 只需按查询结果分配一次 */
+if (hal_rt_io_snapshot_inputs(ctx, x_image, x_size) != HAL_OK) {
     /* 缓冲不够长：说明调用方与 HAL 对地址域的理解不一致 */
 }
+...
+free(x_image);
 ```
 
 **注意**
 
 - **缓冲不够长返回参数错误**，这是刻意设计 —— 通常意味着调用方和 HAL 对 X 地址域的理解不一致，静默截断会更危险。
 - 只拷缓存，**不读取硬件**。
-- **当前没有公开的映像长度查询函数**，调用方须按现场配置预留足够缓冲（见 4.4.2 末）。
+- **缓冲长度用 `hal_io_image_size()` 查**（见 3.4），不要自己拍一个数字：它与 HAL 的段长理解必须一致。
 - Entry 不保证整字节，**按低位在前连续打包**。
 
 #### 4.4.2 输出映像下发函数hal_rt_io_flush_outputs()
@@ -1628,8 +1632,8 @@ hal_rt_commit_cycle(ctx);                                 /* 这一刻才下发 
 
 **关于映像长度**
 
-X/Y 所需的最小长度在 `start` 时由配置的起始地址和实际 PDO 位长算出，但**当前没有公开的长度查询函数**。
-调用方应按现场配置预留足够缓冲；缓冲短于实际需求时，两个函数都会返回 `HAL_ERROR_ARGUMENT` 而不是截断。
+X/Y 所需的最小长度在 `start` 时由配置的起始地址和实际 PDO 位长算出，用 **`hal_io_image_size()` 查询**（见 3.4），不要自己按现场配置推算。
+缓冲短于实际需求时，两个函数都会返回 `HAL_ERROR_ARGUMENT` 而不是截断。
 
 ## 5. 返回码
 
