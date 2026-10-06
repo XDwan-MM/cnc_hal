@@ -8,20 +8,8 @@
 #include "/opt/GreeMaster/include/libGREEMASTER/GreeMasterAPI.h"
 #include "/opt/GreeMaster/include/libGREEMASTER/gm_errcode.h"
 
-// ===============错误检查宏=================
-#define CHECK_RC(rc,info,label) \
-    do { \
-        if ((rc) != 0) { \
-            printf("%s,rc = %d\n", info,rc); \
-            goto label; \
-        } \
-    } while(0)
-#define CHECK_FUNC(func) do { \
-    int ret = (func); \
-    if (ret < 0) { \
-        fprintf(stderr, "Error in function: %s, rc = %d\n", #func, ret); \
-    } \
-} while (0)
+/* 错误检查宏不在这里：本层在 main_demo.c 里按「各阶段共用一份启动预算」的需要
+ * 重定义了 CHECK_RC。device.h 旧版那个与它语义不同、且全仓库无人使用，已删除。 */
 
 typedef struct{
    int slave_pos;

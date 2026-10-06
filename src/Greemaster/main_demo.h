@@ -46,7 +46,6 @@ int  Master_Interrupted(void);
 /* =============== 开发期开关，上机前保持默认 =============== */
 
 #define PARAM_CHANG 0          /* 是否修改主站参数 */
-#define MAN_FMMU    0          /* 是否手动输入 fmmu */
 
 /* 握手前的 REG/SDO 交互窗口（GM_Wait_Pilot_Data_Response）——主站 OP 之后、
  * 握手之前。设备参数（SDO）下发应落在这里。尚未实现。 */
@@ -63,7 +62,6 @@ typedef struct {
 } ErrorContext;
 
 void error_module_init(void);
-void error_module_destroy(void);
 
 typedef enum _EcatMasterError
 {

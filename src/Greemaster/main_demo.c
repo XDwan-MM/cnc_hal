@@ -37,7 +37,6 @@ static uint32_t startup_seconds_left(void) {
 }
 
 /* 每个阶段共用一个截止时间；不可中断的 SDK 调用只能返回后检测超时。 */
-#undef CHECK_RC
 #define CHECK_RC(value, message, label) do { \
     if ((value) != 0) { snprintf(g_start_error, sizeof(g_start_error), "%s (rc=%d)", message, (int)(value)); goto label; } \
     if (startup_expired()) { rc = MASTER_START_TIMEOUT; snprintf(g_start_error, sizeof(g_start_error), "启动总预算已耗尽"); goto label; } \
@@ -64,7 +63,10 @@ device_data_t g_device_data[MAX_DEVICE_NUM] = { 0 };  // 假设最多 30 个设�
 // 原 sigint_handler() 已删除：库不该装 SIGINT 处理器，会覆盖宿主程序自己的。
 // Ctrl-C、退出流程归调用方。HAL 只保留 exit_flag / InterruptFlag 供其查询与打断。
 
-// 实际分配内存的全局错误上下文
+/* 实际分配内存的全局错误上下文。
+ * **当前只写不读**：错误回调往里填，但全仓库没有任何读取者（旧的报警查表随
+ * master.c 一起退休）。保留的理由是 get_unique_error_id() 那张「厂商错误码 ->
+ * ErrorID」的表是恢复更细报警的现成材料；真要用起来必须补上读取方。 */
 static ErrorContext g_current_error_ctx;
 
 // ==========================================
@@ -118,15 +120,6 @@ void error_module_init(void) {
     //atomic_store(&g_has_new_error, false);
 }
 
-void error_module_destroy(void) {
-    // 1. 强制清除当前错误
-    //atomic_store(&g_has_new_error, false);
-    memset(&g_current_error_ctx, 0, sizeof(g_current_error_ctx));
-
-    // 2. 如果有其他资源（如日志文件句柄、子线程ID等），在这里关闭
-
-    printf("[SYS] Error module destroyed/cleaned up.\n");
-}
 // ================错误处理函数=================
 void err_call_back() {
     Err_info errinfo;
@@ -153,9 +146,6 @@ void err_call_back() {
     atomic_store(&InterruptFlag, 1);
 }
 
-
-// 提前声明
-Fmmu_Manul* FMMU_Manul_Set_Func();
 // ================ 新增：初始化函数（供外部调用）=================
 /* 主站进 OP 之后、进周期收发模式之前的一次握手。
  *
@@ -216,7 +206,6 @@ MASTER_API int ethercat_init(const MasterConfig* cfg) {
     uint32_t CRCCount = 0;
     uint32_t TimeOutCount = 0;
     DEVICE_TYPE types[MAX_DEVICE_NUM] = {0};
-    Fmmu_Manul* fmmu_manul_list = NULL;
     /* 先清上一次的失败原因：下面有几条提前 return（已初始化、cfg 为空、参数非法），
      * 不清的话 Master_StartupError() 会把上一次的原因当成这一次报出去。 */
     g_start_error[0] = '\0';
@@ -357,24 +346,14 @@ MASTER_API int ethercat_init(const MasterConfig* cfg) {
         CHECK_RC(rc, "SDO功能使能失败", err_close);
     }
 
-    if (MAN_FMMU) {
-        fmmu_manul_list = FMMU_Manul_Set_Func();
-        if (!fmmu_manul_list) { rc = -1; goto err_close; }
-    }
-
     printf("========== 配置信息下发并激活:GM_Config_Download_And_Active ============\n");
     seconds_left = startup_seconds_left();
     if (!seconds_left) { rc = MASTER_START_TIMEOUT; goto err_close; }
-    rc = GM_Config_Download_And_Active(slave_list, &CRCCount, &TimeOutCount, seconds_left, Master_InterruptFlag(), fmmu_manul_list);
+    rc = GM_Config_Download_And_Active(slave_list, &CRCCount, &TimeOutCount, seconds_left, Master_InterruptFlag(), NULL);   /* 手动 FMMU 表已删除：见提交说明 */
     CHECK_RC(rc, "配置信息下发失败", err_close);
 
     if (CRCCount || TimeOutCount) {
         printf("op前数据帧出现错误: CRC错误次数:%d, 超时错误次数:%d\n", CRCCount, TimeOutCount);
-    }
-
-    if (fmmu_manul_list) {
-        Fmmu_Manul_Free(fmmu_manul_list);
-        fmmu_manul_list = NULL;
     }
 
     printf("========== 等待主站进入OP:GM_Master_Wait_OP ============\n");
@@ -392,7 +371,6 @@ MASTER_API int ethercat_init(const MasterConfig* cfg) {
     return 0;
 
 err_close:
-    if (fmmu_manul_list) Fmmu_Manul_Free(fmmu_manul_list);
     ethercat_close();
     return rc < 0 ? rc : -1;
 }
@@ -501,6 +479,11 @@ MASTER_API void Master_RequestStop(void) {
  * 判断有没有掉出 OP。它走 mailbox，是慢通道，**不能放周期里**；将来由 HAL 提供
  * 非 RT 的查询接口，调用节奏由实时端定。原实现只是每秒 printf 一次。 */
 
+/* ↓ write_sdo_index / read_sdo_index **当前没有任何调用者**（启动时
+ * GM_Sdo_Datagram_Enable 已经把 SDO 通道打开，却没人用）。
+ * **先别删**：确认驱动器 0x606C/0x60FF 的速度单位很可能就要走这里读对象字典。
+ * 真要启用时记得检查 GM_Sdo_Request_Send / GM_Sdo_Receive 的返回值，
+ * 并去掉每次重试都 printf 的写法。 */
 int write_sdo_index(int slave_pos, uint16_t index, uint8_t subindex, void* data, size_t data_size, int max_retry) {
     int cnt = 0;
     
@@ -573,124 +556,4 @@ int read_sdo_index(int slave_pos, uint16_t index, uint8_t subindex, void* data, 
     //SdoWar_Info_Get(NULL, &sdo_request);        // 检测是否存在警告信息
     
     return 0;
-}
-
-
-// ====================================================手动设置FMMU函数============================================
-Fmmu_Manul* FMMU_Manul_Set_Func(){
-    // 示例：初始化2个从设备，每个从设备的FMMU数量分别为3和2
-    uint32_t num_slaves = 7;                    // 从站数量
-    uint32_t every_slave_fmmu_num[] = {2,2,2,2,2,2,2};   // 每个从站所需要的fmmu
-
-    // 调用初始化函数
-    Fmmu_Manul* fmmu_manul = Fmmu_Manul_Init(num_slaves, every_slave_fmmu_num);
-    if (!fmmu_manul) {
-        printf("初始化失败！\n");
-        return NULL;
-    }
-
-    // 示例：访问并打印FMMU数据
-    printf("总从设备数量: %d\n", fmmu_manul->total_slave_number);
-    fmmu_manul->total_Rxpdo_addr = 0;       // 收fmmu起始地址
-    fmmu_manul->total_Rxpdo_size = 20;       // 收fmmu总长度
-    fmmu_manul->total_Txpdo_addr = 20;       // 发fmmu起始地址
-    fmmu_manul->total_Txpdo_size = 20;       // 发fmmu总长度
-
-    uint32_t fmmu_log_start_addr[7][2] = {{0x0000, 0x0014}, 
-                                          {0x0000, 0x0014},
-                                          {0x0010, 0x0014},
-                                          {0x0010, 0x0024},
-                                          {0x0010, 0x0024},
-                                          {0x0010, 0x0026},
-                                          {0x0012, 0x0026},};
-    uint32_t fmmu_data_size[7][2]      = {{0x0000, 0x0000}, 
-                                          {0x0010, 0x0000},
-                                          {0x0000, 0x0010},
-                                          {0x0000, 0x0000},
-                                          {0x0000, 0x0002},
-                                          {0x0002, 0x0000},
-                                          {0x0002, 0x0002},};
-    uint32_t fmmu_log_start_bit[7][2]  = {{0x0000, 0x0000}, 
-                                          {0x0000, 0x0000},
-                                          {0x0000, 0x0000},
-                                          {0x0000, 0x0000},
-                                          {0x0000, 0x0000},
-                                          {0x0000, 0x0000},
-                                          {0x0000, 0x0000},};
-    uint32_t fmmu_log_end_bit[7][2]    = {{0x0007, 0x0007}, 
-                                          {0x0007, 0x0007},
-                                          {0x0007, 0x0007},
-                                          {0x0007, 0x0007},
-                                          {0x0007, 0x0007},
-                                          {0x0007, 0x0007},
-                                          {0x0007, 0x0007},};
-    uint32_t fmmu_phy_start_addr[7][2] = {{0x0000, 0x0000}, 
-                                          {0x0000, 0x0000},
-                                          {0x0000, 0x0000},
-                                          {0x1700, 0x1C00},
-                                          {0x1100, 0x1400},
-                                          {0x1100, 0x1400},
-                                          {0x1100, 0x1400},};
-    uint32_t fmmu_start_bit[7][2]      = {{0x0000, 0x0000}, 
-                                          {0x0000, 0x0000},
-                                          {0x0000, 0x0000},
-                                          {0x0000, 0x0000},
-                                          {0x0000, 0x0000},
-                                          {0x0000, 0x0000},
-                                          {0x0000, 0x0000},};                                          
-    uint32_t fmmu_dir[7][2]            = {{0x0002, 0x0001}, 
-                                          {0x0002, 0x0001},
-                                          {0x0002, 0x0001},
-                                          {0x0002, 0x0001},
-                                          {0x0002, 0x0001},
-                                          {0x0002, 0x0001},
-                                          {0x0002, 0x0001},};           
-    uint32_t fmmu_enable[7][2]         = {{0x0000, 0x0000}, 
-                                          {0x0001, 0x0000},
-                                          {0x0000, 0x0001},
-                                          {0x0000, 0x0000},
-                                          {0x0000, 0x0001},
-                                          {0x0001, 0x0000},
-                                          {0x0001, 0x0001},};           
-    for (size_t i = 0; i < 7; i++)
-    {
-        for (size_t j = 0; j < 2; j++)
-        {
-            fmmu_manul->Fmmu_manul_slave_list[i].Fmmu_manul_unit_list[j].fmmu_num = j;
-            fmmu_manul->Fmmu_manul_slave_list[i].Fmmu_manul_unit_list[j].fmmu_log_start_addr = fmmu_log_start_addr[i][j];
-            fmmu_manul->Fmmu_manul_slave_list[i].Fmmu_manul_unit_list[j].fmmu_data_size = fmmu_data_size[i][j];
-            fmmu_manul->Fmmu_manul_slave_list[i].Fmmu_manul_unit_list[j].fmmu_log_start_bit = fmmu_log_start_bit[i][j];
-            fmmu_manul->Fmmu_manul_slave_list[i].Fmmu_manul_unit_list[j].fmmu_log_end_bit = fmmu_log_end_bit[i][j];
-            fmmu_manul->Fmmu_manul_slave_list[i].Fmmu_manul_unit_list[j].fmmu_phy_start_addr = fmmu_phy_start_addr[i][j];
-            fmmu_manul->Fmmu_manul_slave_list[i].Fmmu_manul_unit_list[j].fmmu_start_bit = fmmu_start_bit[i][j];
-            fmmu_manul->Fmmu_manul_slave_list[i].Fmmu_manul_unit_list[j].fmmu_dir = fmmu_dir[i][j];
-            fmmu_manul->Fmmu_manul_slave_list[i].Fmmu_manul_unit_list[j].fmmu_enable = fmmu_enable[i][j];
-        }
-        
-    }
-    
-    // 遍历每个从设备
-    for (uint32_t i = 0; i < num_slaves; i++) {
-        Fmmu_Manul_Slave* slave = &fmmu_manul->Fmmu_manul_slave_list[i];
-        printf("从设备 %d:\n", i);
-        printf("  FMMU总数量: %d\n", slave->fmmu_total_quantity);
-
-        // 遍历该从设备的每个FMMU单元
-        for (uint32_t j = 0; j < slave->fmmu_total_quantity; j++) {
-            Fmmu_Manul_Unit* unit = &slave->Fmmu_manul_unit_list[j];
-            printf("    FMMU单元 %d:\n", j);
-            printf("      编号: %d\n", unit->fmmu_num);
-            printf("      逻辑起始地址: 0x%x\n", unit->fmmu_log_start_addr);
-            printf("      数据长度: %d\n", unit->fmmu_data_size);
-            printf("      逻辑起始位: %d\n", unit->fmmu_log_start_bit);
-            printf("      逻辑结束位: %d\n", unit->fmmu_log_end_bit);
-            printf("      物理起始地址: 0x%x\n", unit->fmmu_phy_start_addr);
-            printf("      起始位: %d\n", unit->fmmu_start_bit);
-            printf("      类型: %d\n", unit->fmmu_dir);
-            printf("      使能: %d\n", unit->fmmu_enable);
-            printf("      保留字段: %d, %d, %d\n", unit->fmmu_reserved1, unit->fmmu_reserved2, unit->fmmu_reserved3);
-        }
-    }
-
-    return fmmu_manul;
 }
