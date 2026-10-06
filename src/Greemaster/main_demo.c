@@ -12,7 +12,7 @@
 #endif
 
 // ==============全局变量定义===============
-static int          InterruptFlag = 0;  // 打断标志（传给 GM 的阻塞调用）
+static atomic_int   InterruptFlag = 0;  // 打断标志（传给 GM 的阻塞调用）
 static atomic_int   exit_flag      = 1;  // 主站出错/已停机：错误回调或关闭时置 1
 static atomic_int stop_requested = 0;
 static uint64_t start_deadline_ms;
@@ -51,6 +51,14 @@ const char* Master_StartupError(void) { return g_start_error; }
 static MasterConfig g_cfg;
 static int g_resources, g_master_initialized, g_io_resources, g_ready;
 int Master_SlaveCount(void) { return g_ready ? slave_num : 0; }
+
+/* 传给 GM 阻塞调用的打断标志地址。**SDK 只读它**；HAL 侧一律用 atomic 访问。
+ * 单独给个取址函数，是为了让 device.c 那两处 EEPROM / PDO 映射读取也能被打断——
+ * 否则某台从站不应答时要干等满 10 秒，30 台最坏 300 秒，谁也停不下来。
+ * _Atomic int 与 int 布局一致，这里取地址做转换。 */
+int* Master_InterruptFlag(void) { return (int*)&InterruptFlag; }
+/* 是否已被要求打断（错误回调或 Master_RequestStop 置位）。 */
+int Master_Interrupted(void) { return atomic_load(&InterruptFlag) != 0; }
 device_data_t g_device_data[MAX_DEVICE_NUM] = { 0 };  // 假设最多 30 个设备
 // ================打断函数=================
 // 原 sigint_handler() 已删除：库不该装 SIGINT 处理器，会覆盖宿主程序自己的。
@@ -122,7 +130,11 @@ void error_module_destroy(void) {
 // ================错误处理函数=================
 void err_call_back() {
     Err_info errinfo;
-    Err_Code_Get(&errinfo);
+    /* 先清零再取：失败时 SDK 不保证出参被填，读未初始化的栈会把
+     * 模块/状态机/错误号报成垃圾，把现场排错引向错误方向。 */
+    memset(&errinfo, 0, sizeof(errinfo));
+    if (Err_Code_Get(&errinfo) != 0)
+        printf("错误回调：Err_Code_Get 失败，错误详情不可用\n");
     printf("错误模块：%d, 错误状态机：%d, 错误号：%d\n", errinfo.Model,
         errinfo.Fms, errinfo.Code);
     // 1. 提取关键字段并查表
@@ -138,7 +150,7 @@ void err_call_back() {
     //atomic_store(&g_has_new_error, true);
     Err_Info_Get(errinfo, NULL);
     exit_flag = 1;
-    InterruptFlag = 1;
+    atomic_store(&InterruptFlag, 1);
 }
 
 
@@ -156,12 +168,13 @@ Fmmu_Manul* FMMU_Manul_Set_Func();
 /* 最近一次收帧的警告。Master_BusHealth() 读它。 */
 static PdoWarn g_last_warn;
 
-/* 收帧后统一记录；有标志就顺便取详情。 */
+/* 收帧后统一记录。**只缓存，不做任何打印**：本函数在 Master_WaitCycle() 的
+ * 实时路径上，而 PdoWar_Info_Get() 是 SDK 的打印型接口（OutFile=NULL 即打到
+ * stdout）——持续告警会变成每拍 printf，把实时线程拖住。详情改在非 RT 的
+ * Master_BusHealth() 里取。 */
 static void record_warn(const PdoWarn* w) {
     if (!w) return;
     g_last_warn = *w;
-    if (w->PDOWarnFlag || w->DCWarnFlag)
-        PdoWar_Info_Get(NULL, &g_last_warn);
 }
 
 static int master_handshake(void) {
@@ -204,6 +217,9 @@ MASTER_API int ethercat_init(const MasterConfig* cfg) {
     uint32_t TimeOutCount = 0;
     DEVICE_TYPE types[MAX_DEVICE_NUM] = {0};
     Fmmu_Manul* fmmu_manul_list = NULL;
+    /* 先清上一次的失败原因：下面有几条提前 return（已初始化、cfg 为空、参数非法），
+     * 不清的话 Master_StartupError() 会把上一次的原因当成这一次报出去。 */
+    g_start_error[0] = '\0';
     if (g_resources || g_ready) return -1;
 
     /* 配置非法就早失败——放在任何 GM 调用之前，不留下半开的主站。 */
@@ -220,11 +236,10 @@ MASTER_API int ethercat_init(const MasterConfig* cfg) {
         return -1;
     }
     g_cfg = *cfg;
-    g_start_error[0] = '\0';
     const uint64_t now = monotonic_ms();
     if (now == UINT64_MAX) return -1;
     start_deadline_ms = now + cfg->start_timeout_ms;
-    InterruptFlag = 0;
+    atomic_store(&InterruptFlag, 0);
     exit_flag = 0;
     stop_requested = 0;
     device_reset();
@@ -283,7 +298,7 @@ MASTER_API int ethercat_init(const MasterConfig* cfg) {
     printf("===================== 主站开始:GM_Master_Start ========================\n");
     uint32_t seconds_left = startup_seconds_left();
     if (!seconds_left) { rc = MASTER_START_TIMEOUT; goto err_close; }
-    rc = GM_Master_Start(seconds_left, &InterruptFlag);
+    rc = GM_Master_Start(seconds_left, Master_InterruptFlag());
     CHECK_RC(rc, "主站开始失败", err_close);
 
     slave_num = GM_Slave_Num_Get();
@@ -350,7 +365,7 @@ MASTER_API int ethercat_init(const MasterConfig* cfg) {
     printf("========== 配置信息下发并激活:GM_Config_Download_And_Active ============\n");
     seconds_left = startup_seconds_left();
     if (!seconds_left) { rc = MASTER_START_TIMEOUT; goto err_close; }
-    rc = GM_Config_Download_And_Active(slave_list, &CRCCount, &TimeOutCount, seconds_left, &InterruptFlag, fmmu_manul_list);
+    rc = GM_Config_Download_And_Active(slave_list, &CRCCount, &TimeOutCount, seconds_left, Master_InterruptFlag(), fmmu_manul_list);
     CHECK_RC(rc, "配置信息下发失败", err_close);
 
     if (CRCCount || TimeOutCount) {
@@ -365,7 +380,7 @@ MASTER_API int ethercat_init(const MasterConfig* cfg) {
     printf("========== 等待主站进入OP:GM_Master_Wait_OP ============\n");
     seconds_left = startup_seconds_left();
     if (!seconds_left) { rc = MASTER_START_TIMEOUT; goto err_close; }
-    rc = GM_Master_Wait_OP(seconds_left, &InterruptFlag);
+    rc = GM_Master_Wait_OP(seconds_left, Master_InterruptFlag());
     CHECK_RC(rc, "等待主站进入OP", err_close);
 
     /* 主站到 OP 只是第一步——还要握手才进周期收发模式，从站才会走 OP。 */
@@ -386,18 +401,20 @@ err_close:
 MASTER_API int ethercat_close(void) {
     int first_error = 0, rc;
     exit_flag = 1;
-    InterruptFlag = 1;
+    atomic_store(&InterruptFlag, 1);
     g_ready = 0;
     /* 调用方须先退出周期调用，再释放主站与句柄。 */
-    if (g_master_initialized) {
-        rc = GM_Master_Close();
-        if (rc != 0 && first_error == 0) first_error = rc < 0 ? rc : -1;
-        g_master_initialized = 0;
-    }
+    /* 顺序照厂商示例（/opt/GreeMaster/examples/main_demo.c）：先释放 PDO 映射链表，
+     * 再关主站。反过来的话等于假设 GM_Master_Close 不会先动这条链——未经验证。 */
     if (slave_list) {
         rc = GM_Free_PDO_Map(slave_list);
         if (rc != 0 && first_error == 0) first_error = rc < 0 ? rc : -1;
         slave_list = NULL;
+    }
+    if (g_master_initialized) {
+        rc = GM_Master_Close();
+        if (rc != 0 && first_error == 0) first_error = rc < 0 ? rc : -1;
+        g_master_initialized = 0;
     }
     if (g_io_resources) {
         rc = IO_Resource_Release();
@@ -442,6 +459,10 @@ MASTER_API int Master_WaitCycle(void) {
 
 MASTER_API int Master_BusHealth(MasterBusHealth* out) {
     if (!out) return -1;
+    /* 非 RT 查询路径：有警告标志时才向 SDK 取详情（该接口会打印）。
+     * 原先在 Master_WaitCycle 里取，持续告警会每拍刷屏并拖住实时线程。 */
+    if (g_last_warn.PDOWarnFlag || g_last_warn.DCWarnFlag)
+        PdoWar_Info_Get(NULL, &g_last_warn);
     out->pdo_warn             = (int)g_last_warn.PDOWarnFlag;
     out->pdo_warn_code        = (int)g_last_warn.PDOWarn;
     out->pdo_warn_para        = g_last_warn.PDOWarnPara;
@@ -469,9 +490,11 @@ MASTER_API int Master_StopFlag(void) {
     return exit_flag || stop_requested;
 }
 
-/* 不跨线程写入 SDK 接收的普通 int，避免与 SDK 的读取竞争。 */
+/* 两个标志都用 atomic：它们会被别的线程（停止请求）或 SDK 的回调线程写，
+ * 而 SDK 的阻塞调用在本线程里轮询。 */
 MASTER_API void Master_RequestStop(void) {
     stop_requested = 1;
+    atomic_store(&InterruptFlag, 1);   /* 让启动期的阻塞调用也能被停掉 */
 }
 
 /* TODO(总线状态) 原 reg_thread_func 的职责：查从站的 AL 状态（寄存器 0x130），

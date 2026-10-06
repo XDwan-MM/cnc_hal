@@ -1,4 +1,5 @@
 #include "device.h"
+#include "main_demo.h"
 #include "slave_list.h"
 #include "common/devdict.h"
 
@@ -292,9 +293,8 @@ static int COERequestResult(const DEVICE_BASIC_INFO* info, const unsigned char* 
         return -1;
 
     if (!have_tx || !have_rx) {
-        int interrupt = 0;
-        Slave_info* fallback = GM_PDO_Map_Get(slave_pos, 10, &interrupt);
-        if (!fallback) return -1;
+        Slave_info* fallback = GM_PDO_Map_Get(slave_pos, 10, Master_InterruptFlag());
+        if (!fallback || Master_Interrupted()) return -1;
         const int rc = extract_pdos(fallback, 0x1c13, &tx) ||
                        extract_pdos(fallback, 0x1c12, &rx);
         for (const sm_info* sm = fallback->sm_list; sm; sm = sm->next) {
@@ -573,8 +573,20 @@ int device_match(Slave_info* list, DEVICE_TYPE* types, int slave_num) {
         case SERVO_TYPE: rc = servo_addr_config(list, i, slot); break;
         case GREE_AXIS6_TYPE: rc = servo_addr_axis6_config(list, slot, i); break;
         case GREE_AXIS4_TYPE: rc = servo_addr_axis4_config(list, slot, i); break;
-        case CONTROL_PANEL_TYPE: rc = bind_io(list, i, slot, 1); break;
-        case IO_MODEL_TYPE: rc = bind_io(list, i, slot, 0); break;
+        case CONTROL_PANEL_TYPE:
+            rc = bind_io(list, i, slot, 1);
+            /* IO/面板装配失败原先只落到 main_demo 的通用文案，现场看不出是哪台、
+             * 哪个方向、第几个 Entry。这里补上从站与槽号。 */
+            if (rc != 0 && !g_bind_error[0])
+                snprintf(g_bind_error, sizeof(g_bind_error),
+                         "从站 %d 槽 %d 的操作面板 PDO 装配失败（查 Entry 位宽与顺序）", i, slot);
+            break;
+        case IO_MODEL_TYPE:
+            rc = bind_io(list, i, slot, 0);
+            if (rc != 0 && !g_bind_error[0])
+                snprintf(g_bind_error, sizeof(g_bind_error),
+                         "从站 %d 槽 %d 的 IO 模块 PDO 装配失败（查 Entry 位宽与顺序）", i, slot);
+            break;
         default: break;
         }
         if (rc != 0) {
@@ -607,8 +619,9 @@ int get_device_info_from_eeprom(int slave_num, DEVICE_TYPE* types,
     for (int i = 0; i < slave_num; ++i) {
         unsigned char* memory = calloc(buffer_size, 1);
         if (!memory) return -1;
-        int interrupt = 0;
-        int rc = GM_EEPROM_Get(i, memory, buffer_size, 10, &interrupt);
+        /* 接真正的打断标志：否则从站不应答时要干等满 10 秒。 */
+        int rc = GM_EEPROM_Get(i, memory, buffer_size, 10, Master_InterruptFlag());
+        if (Master_Interrupted()) { free(memory); return -1; }
         if (rc > 0 && (size_t)rc <= buffer_size) {
             const size_t actual_bytes = (size_t)rc;
             if (actual_bytes < WORD_TO_BYTES(EEPROM_FIXED_WORDS)) {

@@ -9,6 +9,7 @@
 
 static uint64_t fake_ms;
 static uint32_t start_seconds, active_seconds, op_seconds, sync_seconds, master_cycle;
+static int* eeprom_interrupt_ptr;   /* GM_EEPROM_Get 收到的打断标志地址 */
 static int advance_start_ms, stop_during_wait;
 int __wrap_clock_gettime(clockid_t id, struct timespec* ts) {
     ts->tv_sec = (time_t)(fake_ms / 1000);
@@ -146,6 +147,7 @@ static size_t make_eeprom(unsigned char* data, int six_axis) {
 }
 
 int GM_EEPROM_Get(int pos, unsigned char* out, size_t size, uint32_t timeout, int* interrupt) {
+    eeprom_interrupt_ptr = interrupt;
     int rc = CALL(); if (rc) return rc;
     CHECK(size >= 4096);
     size_t n = make_eeprom(out, slaves > 1);
@@ -587,6 +589,30 @@ static void allocation_tests(void) {
     CHECK(succeeded);
 }
 
+/* 打断标志必须**真的接上**：不接的话，某台从站不应答 EEPROM 时要干等满 10 秒，
+ * 30 台从站最坏 300 秒，期间 Master_RequestStop() 也停不下来。
+ * 这里不模拟 SDK 的轮询，只验证「传进去的就是 Master_RequestStop 置位的那块存储」。 */
+static void interrupt_wiring_tests(void) {
+    config.cycle_us = 1000; config.dc_enable = 1;
+    eeprom_interrupt_ptr = NULL;
+    clear_failure();
+    CHECK(ethercat_init(&config) == 0);
+    CHECK(eeprom_interrupt_ptr != NULL);
+    CHECK(*eeprom_interrupt_ptr == 0);
+    Master_RequestStop();
+    CHECK(*eeprom_interrupt_ptr == 1);   /* 同一块存储：停止能打断 EEPROM 等待 */
+    CHECK(Master_StopFlag());
+    CHECK(ethercat_close() == 0);
+
+    /* 重新 init 必须把标志清回去，否则下一次启动会被「上一次的停止」立刻打断。
+     * GM_Master_Start 等桩里已有 CHECK(*interrupt == 0)，会一并验证这一点。 */
+    eeprom_interrupt_ptr = NULL;
+    clear_failure();
+    CHECK(ethercat_init(&config) == 0);
+    CHECK(eeprom_interrupt_ptr != NULL && *eeprom_interrupt_ptr == 0);
+    CHECK(ethercat_close() == 0);
+}
+
 int main(void) {
     lifecycle_tests();
     servo_tests();
@@ -595,6 +621,7 @@ int main(void) {
     io_tests();
     fallback_tests();
     allocation_tests();
+    interrupt_wiring_tests();
     printf("driver_regression: %u checks passed\n",checks);
     return 0;
 }
