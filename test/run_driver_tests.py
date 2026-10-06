@@ -69,9 +69,9 @@ if not BUILD_ONLY:
 ds402 = build("ds402", ["test/ds402_test.c"])
 if not BUILD_ONLY:
     print("DS402:", run("ds402", [ds402]).strip().splitlines()[-1])
-base = build("device_base", ["test/device_base_test.cpp","src/internal/DeviceBase.cpp"], cpp=True)
-if not BUILD_ONLY:
-    print("DeviceBase:", run("device_base", [base]).strip().splitlines()[-1])
+# 原先这里编 src/internal/DeviceBase.cpp + test/device_base_test.cpp。
+# 2026-10-04：未构建的 C++ 接口层（IDevice/DeviceBase/ConfigModel/IDIO）已整体删除，
+# 它不产出任何库、也没有公共入口，只由这个用例单独编着。
 
 entry = dict(vendor_id=1, product_code=2, revision="*", type="servo", profile="ds402", name="Servo")
 valid = dict(version=1, devices=[entry])
