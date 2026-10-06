@@ -18,6 +18,13 @@ typedef struct {
     unsigned cycle;
 } Runner;
 
+/* 主轴的逻辑轴号一律从配置里读，不要在本文件里写死数字。
+ * HAL 对逻辑轴号取值本身没有要求，但台架与 cnc_rt 共用一套编号
+ * （X=0/Y=1/Z=2/主轴=3）；写死一个数字，换约定时就会静默指向别的轴。 */
+static HalAxisId spindle_axis(const Runner* r) {
+    return (HalAxisId)r->cfg->spindles[0].axis.logical_axis;
+}
+
 static int call(const char* name, int32_t rc) {
     if (rc != HAL_OK) {
         char message[96];
@@ -110,7 +117,7 @@ static int selftest(void) {
         if (i == 3) a = &config.spindles[0].axis;
         a->slave_pos = i == 3 ? 2 : i + 3;
         a->axis_index = 0;
-        a->logical_axis = i == 3 ? 0 : i + 1;
+        a->logical_axis = i == 3 ? 3 : i;
         a->estop_action = HAL_ESTOP_DISABLE_VOLTAGE;
         a->work_mode = i == 3 ? HAL_WORK_VELOCITY : HAL_WORK_POSITION;
         a->encoder_type = HAL_ENC_INCREMENTAL_Z;
@@ -413,15 +420,15 @@ failed:
 
 static int spindle_snapshot(Runner* r, HalCSpindleStatus* state) {
     if (begin_tick(r)) return -1;
-    int rc = hal_rt_spindle_read_status(r->ctx, 0, state);
+    int rc = hal_rt_spindle_read_status(r->ctx, spindle_axis(r), state);
     int committed = end_tick(r);
     return call("spindle status", rc) || committed ? -1 : 0;
 }
 
 static int spindle_write_speed_tick(Runner* r, double rpm, int dir) {
     if (begin_tick(r)) return -1;
-    int rc = hal_rt_spindle_write_speed(r->ctx, 0, rpm, dir);
-    if (rc) (void)hal_rt_spindle_estop(r->ctx, 0);
+    int rc = hal_rt_spindle_write_speed(r->ctx, spindle_axis(r), rpm, dir);
+    if (rc) (void)hal_rt_spindle_estop(r->ctx, spindle_axis(r));
     int committed = end_tick(r);
     return call("hal_rt_spindle_write_speed", rc) || committed ? -1 : 0;
 }
@@ -437,8 +444,8 @@ static int spindle_speed_case(Runner* r, int dir) {
                "确认主轴正转方向、低速值、外部测速与实体停机手段" :
                "确认主轴反转方向、低速值、外部测速与实体停机手段")) return -1;
     if (call("spindle mode CSV",
-             hal_rt_spindle_request_mode(r->ctx, 0, HAL_SPINDLE_CSV)) ||
-        call("spindle enable", hal_rt_spindle_enable(r->ctx, 0, 1))) return -1;
+             hal_rt_spindle_request_mode(r->ctx, spindle_axis(r), HAL_SPINDLE_CSV)) ||
+        call("spindle enable", hal_rt_spindle_enable(r->ctx, spindle_axis(r), 1))) return -1;
     HalCSpindleStatus state;
     int ready = 0;
     for (unsigned i = 0; i < r->settings->settle_cycles; ++i) {
@@ -474,11 +481,11 @@ static int spindle_speed_case(Runner* r, int dir) {
         if (fabs(state.actual_speed) <= s->speed_tolerance) { ready = 1; break; }
     }
     if (!ready) { fprintf(stderr, "主轴未在规定周期内停转\n"); goto failed; }
-    (void)hal_rt_spindle_estop(r->ctx, 0);
+    (void)hal_rt_spindle_estop(r->ctx, spindle_axis(r));
     if (tick(r)) return -1;
     return prompt("确认外部测速、实际转向与记录一致，且主轴已停稳");
 failed:
-    (void)hal_rt_spindle_estop(r->ctx, 0);
+    (void)hal_rt_spindle_estop(r->ctx, spindle_axis(r));
     (void)tick(r);
     return -1;
 }
@@ -503,7 +510,7 @@ static int spindle_angle_case(Runner* r) {
            state.position_deg, s->angle_target, s->max_angle_step);
     if (prompt("确认主轴静止；将当前位置临时标为本次测试的 0 度，随后测试 CSP 小角度目标")) return -1;
     if (call("hal_rt_axis_set_pos(spindle, 0 deg)",
-             hal_rt_axis_set_pos(r->ctx, 0, 0.0))) return -1;
+             hal_rt_axis_set_pos(r->ctx, spindle_axis(r), 0.0))) return -1;
     if (spindle_snapshot(r, &state)) return -1;
     printf("SPINDLE test zero position=%.6f deg\n", state.position_deg);
     if (fabs(state.position_deg) > s->angle_tolerance) {
@@ -511,8 +518,8 @@ static int spindle_angle_case(Runner* r) {
         return -1;
     }
     if (call("spindle mode CSP",
-             hal_rt_spindle_request_mode(r->ctx, 0, HAL_SPINDLE_CSP)) ||
-        call("spindle enable", hal_rt_spindle_enable(r->ctx, 0, 1))) return -1;
+             hal_rt_spindle_request_mode(r->ctx, spindle_axis(r), HAL_SPINDLE_CSP)) ||
+        call("spindle enable", hal_rt_spindle_enable(r->ctx, spindle_axis(r), 1))) return -1;
     int ready = 0;
     for (unsigned i = 0; i < r->settings->settle_cycles; ++i) {
         if (spindle_snapshot(r, &state)) goto failed;
@@ -524,12 +531,12 @@ static int spindle_angle_case(Runner* r) {
     }
     if (prompt("主轴已在 CSP 使能且静止；输入 YES 下发目标角度")) goto failed;
     if (begin_tick(r)) goto failed;
-    int rc = hal_rt_spindle_write_pos(r->ctx, 0, s->angle_target);
+    int rc = hal_rt_spindle_write_pos(r->ctx, spindle_axis(r), s->angle_target);
     double expected = 0.0;
     if (!rc) {
         /* 写接口只暂存目标：同一拍读取真正生成的累计目标，再决定是否提交。 */
         HalCAxisStatus axis;
-        rc = hal_rt_axis_read_status(r->ctx, 0, &axis);
+        rc = hal_rt_axis_read_status(r->ctx, spindle_axis(r), &axis);
         if (!rc) {
             expected = axis.command_pos;
             const double delta = expected - axis.actual_pos;
@@ -542,7 +549,7 @@ static int spindle_angle_case(Runner* r) {
         }
     }
     /* 超限先取消暂存位置，再提交停机指令，不能把超限目标发送到驱动器。 */
-    if (rc) (void)hal_rt_spindle_estop(r->ctx, 0);
+    if (rc) (void)hal_rt_spindle_estop(r->ctx, spindle_axis(r));
     int committed = end_tick(r);
     if (call("hal_rt_spindle_write_pos/angle limit", rc) || committed) goto failed;
     for (unsigned i = 0; i < r->settings->settle_cycles; ++i) {
@@ -550,13 +557,13 @@ static int spindle_angle_case(Runner* r) {
         printf("SPINDLE angle=%.6f expected=%.6f mode=%d sw=0x%04x\n",
                state.position_deg, expected, state.mode, state.raw_status);
         if (fabs(state.position_deg - expected) <= s->angle_tolerance) {
-            (void)hal_rt_spindle_estop(r->ctx, 0);
+            (void)hal_rt_spindle_estop(r->ctx, spindle_axis(r));
             if (tick(r)) return -1;
             return prompt("确认主轴实际转角与记录一致，且已经停稳");
         }
     }
 failed:
-    (void)hal_rt_spindle_estop(r->ctx, 0);
+    (void)hal_rt_spindle_estop(r->ctx, spindle_axis(r));
     (void)tick(r);
     return -1;
 }
@@ -565,7 +572,7 @@ static int spindle_estop_case(Runner* r) {
     if (!r->settings->spindle.scaling_confirmed ||
         !r->settings->settle_cycles) return -1;
     if (prompt("确认主轴静止、允许使能且实体停机手段可用")) return -1;
-    if (call("spindle enable", hal_rt_spindle_enable(r->ctx, 0, 1))) return -1;
+    if (call("spindle enable", hal_rt_spindle_enable(r->ctx, spindle_axis(r), 1))) return -1;
     HalCSpindleStatus state;
     int ready = 0;
     for (unsigned i = 0; i < r->settings->settle_cycles; ++i) {
@@ -574,7 +581,7 @@ static int spindle_estop_case(Runner* r) {
     }
     if (!ready) goto failed;
     if (prompt("主轴已使能且静止；输入 YES 执行软件急停")) goto failed;
-    if (call("hal_rt_spindle_estop", hal_rt_spindle_estop(r->ctx, 0))) goto failed;
+    if (call("hal_rt_spindle_estop", hal_rt_spindle_estop(r->ctx, spindle_axis(r)))) goto failed;
     if (tick(r)) goto failed;
     for (unsigned i = 0; i < r->settings->settle_cycles; ++i) {
         if (spindle_snapshot(r, &state)) goto failed;
@@ -583,7 +590,7 @@ static int spindle_estop_case(Runner* r) {
         if (!state.enabled) return 0;
     }
 failed:
-    (void)hal_rt_spindle_estop(r->ctx, 0);
+    (void)hal_rt_spindle_estop(r->ctx, spindle_axis(r));
     (void)tick(r);
     return -1;
 }
@@ -665,7 +672,7 @@ static void usage(const char* program) {
             "用法: %s selftest|static|observe|protocol|inputs|io|stop\n"
             "      %s axis|estop|calibrate|offset 1|2|3\n"
             "      %s spindle-speed|spindle-reverse|spindle-angle|spindle-estop\n"
-            "从站 2 是主轴（逻辑 0）；从站 3～5 是进给轴（逻辑 1～3）。\n"
+            "从站 2 是主轴（逻辑 3）；从站 3～5 是进给轴（逻辑 0～2）。\n"
             "先编辑 examples/hal_hardware_test_config.c。写输出或运动的用例需现场输入 YES。\n",
             program, program, program);
 }
@@ -701,14 +708,14 @@ int main(int argc, char** argv) {
     }
     if (config.panels[0].slave_pos != 0 || config.ios[0].slave_pos != 1 ||
         config.spindles[0].axis.slave_pos != 2 ||
-        config.spindles[0].axis.logical_axis != 0 ||
+        config.spindles[0].axis.logical_axis != 3 ||
         config.spindles[0].axis.work_mode != HAL_WORK_VELOCITY) {
         fprintf(stderr, "面板/IO/主轴从站或主轴逻辑号与台架约定不符\n");
         return 2;
     }
     for (int i = 0; i < 3; ++i) {
         if (config.axes[i].slave_pos != i + 3 ||
-            config.axes[i].logical_axis != i + 1) {
+            config.axes[i].logical_axis != i) {
             fprintf(stderr, "进给轴 %d 的从站或逻辑轴号与台架约定不符\n", i + 1);
             return 2;
         }

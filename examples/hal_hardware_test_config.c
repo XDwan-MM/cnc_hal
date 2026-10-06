@@ -16,7 +16,7 @@ int hal_hardware_test_config(HalCConfig* config, HalHardwareTestSettings* settin
     for (int i = 0; i < 3; ++i) {
         config->axes[i].slave_pos = i + 3;
         config->axes[i].axis_index = 0;
-        config->axes[i].logical_axis = i + 1;
+        config->axes[i].logical_axis = i;
         config->axes[i].work_mode = HAL_WORK_POSITION;
         config->axes[i].feedback_wrap = HAL_WRAP_LINEAR;
         /* 暂以“计数”为用户单位，仅便于编译配置；运动被 scaling_confirmed 拦住。 */
@@ -27,7 +27,7 @@ int hal_hardware_test_config(HalCConfig* config, HalHardwareTestSettings* settin
     config->spindle_count = 1;
     config->spindles[0].axis.slave_pos = 2;
     config->spindles[0].axis.axis_index = 0;
-    config->spindles[0].axis.logical_axis = 0;
+    config->spindles[0].axis.logical_axis = 3;
     config->spindles[0].axis.work_mode = HAL_WORK_VELOCITY;
     config->spindles[0].axis.feedback_wrap = HAL_WRAP_LINEAR;
     /* 占位“计数单位”；主轴转速/角度用例受 confirmed 标志阻止。 */
@@ -47,10 +47,10 @@ int hal_hardware_test_config(HalCConfig* config, HalHardwareTestSettings* settin
     settings->y_len = 512;
 
     /*
-     * 已填从站顺序，下面仍需确认主站参数、伺服型号、急停动作、编码器类型、
-     * PDO 长度和 IO 点位，然后把末尾 return -1 改成 return 0。
-     * 面板与 IO 的 0/256 地址段预留了单模块每方向最大 256 字节；
-     * 真实位映射需按实际 PDO 与接线表核对。
+     * 本函数自 2026-09-24 起就是**填好的台架默认配置**（末尾 return 0），
+     * 不是「待填模板」——早期「把 return -1 改成 return 0」的说法已经作废。
+     * 已按现有记录填入：主站参数、从站顺序、伺服当量/每转计数/enc_off、急停动作。
+     * 仍未确认的项见 examples/测试用例用法.md 顶部的「当前配置状态」。
      */
      config->cycle_us = 1000;            // >= 250
      config->start_timeout_ms = 120000;
@@ -97,10 +97,12 @@ int hal_hardware_test_config(HalCConfig* config, HalHardwareTestSettings* settin
      
      settings->x_len = 512; // 覆盖全部 X 映像的字节数
      settings->y_len = 512; // 覆盖全部 Y 映像的字节数，<= 4096
-     settings->y_safe[256] = 1; // 整块 Y 的已审核安全输出值
+     settings->y_safe[256] = 1; // 占位值：真正要用 io 用例前，整块必须填好并逐位核对
      memcpy(settings->y_test, settings->y_safe, settings->y_len);
      settings->y_test[0] |= (1u << 1); // 仅修改获批输出点
-     settings->io_images_confirmed = 1; // 两幅完整 Y 映像已经逐位核对
+     /* y_safe 现在只有 1 个字节非零、其余全 0，**没有**逐位核对过；
+      * 文档也明确「全零不等于安全」。所以这里保持 0，io 用例会拒绝运行。 */
+     settings->io_images_confirmed = 0;
      /*
      * 主轴虽然也是伺服，仍必须在 spindles[] 中配置才能测试 CSV/CSP。
      */
