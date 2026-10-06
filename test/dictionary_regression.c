@@ -24,6 +24,37 @@ int main(int argc, char** argv) {
             return 1;
         }
         if (!expected_ok) CHECK(DevDict_EntryCount() == 0);
+        if (expected_ok) {
+            /* 2026-10-04：合法用例原先只断言 rc==0，"收下了"不等于"解析对了"。
+             * 用例文件名由 run_driver_tests.py 生成，这里按名字分支核对解析结果。 */
+            const char* path = argv[i] + 1;
+            DevDictEntry e;
+            DevDictObject o;
+            if (strstr(path, "custom")) {
+                CHECK(DevDict_Lookup(1, 2, 0, &e) == 1);
+                CHECK(strcmp(e.profile, "custom") == 0 && e.object_count == 9);
+                CHECK(DevDict_FindObject(&e, DEV_DICT_ROLE_STATUS_WORD, &o) == 1 &&
+                      o.index == 0x6041 && o.bits == 16 && o.is_tx == 1);
+                CHECK(DevDict_FindObject(&e, DEV_DICT_ROLE_TARGET_POS, &o) == 1 &&
+                      o.index == 0x607A && o.bits == 32 && o.is_tx == 0);
+                CHECK(DevDict_FindObject(&e, DEV_DICT_ROLE_OP_MODE, &o) == 1 &&
+                      o.index == 0x6060 && o.bits == 8 && o.is_tx == 0);
+            } else if (strstr(path, "hex")) {
+                /* "0xFFFFFFFF" 必须按十六进制解析 */
+                CHECK(DevDict_Lookup(0xFFFFFFFFu, 2, 0, &e) == 1);
+            } else if (strstr(path, "decimal_string")) {
+                /* "010" 是**十进制字符串**：必须解析成 10（按八进制会给 8） */
+                CHECK(DevDict_Lookup(10, 2, 0, &e) == 1);
+                CHECK(DevDict_Lookup(8, 2, 0, &e) == 0);
+            } else if (strstr(path, "unicode")) {
+                CHECK(DevDict_Lookup(1, 2, 0, &e) == 1);
+                CHECK(strcmp(e.name, "中文😀") == 0);
+            } else if (strstr(path, "valid")) {
+                CHECK(DevDict_Lookup(1, 2, 12345, &e) == 1);   /* revision="*" 通配 */
+                CHECK(strcmp(e.type, "servo") == 0 && strcmp(e.profile, "ds402") == 0);
+                CHECK(strcmp(e.name, "Servo") == 0);
+            }
+        }
     }
     CHECK(DevDict_Load(argv[1], error, sizeof(error)) == 0);
     CHECK(DevDict_Load(NULL, error, sizeof(error)) < 0 && DevDict_EntryCount() == 0);

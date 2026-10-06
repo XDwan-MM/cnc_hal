@@ -137,6 +137,19 @@ cases.append("-"+str(OUT/"missing.json"))
 dictionary=build("dictionary_regression",["test/dictionary_regression.c","src/common/devdict.c"], extra=["-Wl,--wrap=malloc"])
 if not BUILD_ONLY:
     print(run("dictionary_regression",[dictionary,ROOT/"src/Greemaster/devices.json",*cases]).strip())
+
+# RT 候选包用例依赖仓库外的 cnc_rt 副本，所以只在给了 RT_CANDIDATE_DIR 时编跑。
+rt_dir = os.environ.get("RT_CANDIDATE_DIR")
+if rt_dir:
+    sim = Path(rt_dir)/"src/hal/rt_hal_sim_backend.c"
+    if sim.exists():
+        exe = build("rt_sim_candidate", ["test/rt_sim_candidate_regression.c"],
+                    extra=[f'-DRT_SIM_SOURCE="{sim}"', f"-I{Path(rt_dir)}/lib/cnc_hal/internal"])
+        if not BUILD_ONLY: print("RT sim candidate:", run("rt_sim_candidate", [exe]).strip().splitlines()[-1])
+    else:
+        print("RT sim candidate: skipped（RT_CANDIDATE_DIR 下没有 rt_hal_sim_backend.c）")
+
+if not BUILD_ONLY:
     print("ASan/UBSan and leak checks passed. Logs:", OUT)
 else:
     print("Test executables compiled without running. Output:", OUT)

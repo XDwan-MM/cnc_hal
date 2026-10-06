@@ -20,7 +20,7 @@ int main(void) {
 
     /* 独立按 CiA 402 状态编码核查所有 16 位输入；bit4/bit9 不是使能态的条件。
      * bit5 必须保留，否则会把 QuickStopActive 当成 OperationEnabled。 */
-    int enabled_ok = 1, disable_ok = 1, mode_ok = 1;
+    int enabled_ok = 1, disable_ok = 1, mode_ok = 1, drop_ok = 1, reset_ok = 1;
     for (uint32_t raw = 0; raw <= UINT16_MAX; ++raw) {
         const int enabled = (raw & 0x006Fu) == 0x0027u;
         s = step_enable((uint16_t)raw, DS402_MODE_CSP);
@@ -31,10 +31,20 @@ int main(void) {
         s = Ds402_NextStepReq((uint16_t)raw, DS402_MODE_CSV, DS402_REQ_ENABLE,
                              DS402_MODE_CSP, DS402_MODESW_DISABLE_FIRST);
         if ((s.kind == DS402_STEP_DISABLE_OP) != enabled) mode_ok = 0;
+        /* 断电：只有已经在 SwitchOnDisabled 时才"不动"，其余一律写 0x00。 */
+        s = Ds402_NextStepReq((uint16_t)raw, DS402_MODE_CSP, DS402_REQ_DROP_VOLTAGE,
+                             DS402_MODE_CSP, DS402_MODESW_DISABLE_FIRST);
+        if ((s.kind == DS402_STEP_DROP_VOLTAGE) != ((raw & 0x004Fu) != 0x0040u)) drop_ok = 0;
+        /* 清错：只在状态字带 Fault 位（bit3）时才发。 */
+        s = Ds402_NextStepReq((uint16_t)raw, DS402_MODE_CSP, DS402_REQ_FAULT_RESET,
+                             DS402_MODE_CSP, DS402_MODESW_DISABLE_FIRST);
+        if ((s.kind == DS402_STEP_FAULT_RESET) != ((raw & DS402_SW_BIT_FAULT) != 0)) reset_ok = 0;
     }
     chk(enabled_ok, "全部 65536 状态字：使能事实符合 CiA 402");
     chk(disable_ok, "全部 65536 状态字：去使能识别一致");
     chk(mode_ok, "全部 65536 状态字：切模式前去使能识别一致");
+    chk(drop_ok, "全部 65536 状态字：断电判定一致");
+    chk(reset_ok, "全部 65536 状态字：清错只在 Fault 时发");
 
     printf("四个稳定状态字（照 cnc_rt Master_Run 的掩码）：\n");
     s = step_enable(0x0040, DS402_MODE_CSP);

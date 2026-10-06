@@ -5,10 +5,12 @@
 #error "Define RT_SIM_SOURCE to the candidate RT simulation source"
 #endif
 #include RT_SIM_SOURCE
-#include <assert.h>
+#include <stdio.h>
 
 static unsigned checks;
-#define CHECK(expr) do { ++checks; assert(expr); } while (0)
+/* 不用 assert()：带上 -DNDEBUG 时它会整段消失，程序仍会打印"26 checks passed"。 */
+#define CHECK(expr) do { ++checks; if (!(expr)) { \
+    fprintf(stderr, "line %d: %s\n", __LINE__, #expr); return 1; } } while (0)
 
 int main(void) {
     MasterConfig cfg = {1000, 10000, 1000, 0};

@@ -1,8 +1,10 @@
 #include "hal_c_api.h"
-#include <assert.h>
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
+
+/* 不用 assert()：-DNDEBUG 下会整段消失，程序仍打印 "passed"。 */
+#define CHECK(x) do { if (!(x)) { fprintf(stderr, "line %d: %s\n", __LINE__, #x); return 1; } } while (0)
 
 static HalCConfig good(void) {
     HalCConfig c = {0};
@@ -26,40 +28,40 @@ static HalCConfig good(void) {
 int main(void) {
     HalCConfig c = good();
     char err[128];
-    assert(hal_config_validate(&c, err, sizeof(err)) == HAL_OK && !err[0]);
-    assert(hal_config_validate(NULL, err, 1) == HAL_ERROR_ARGUMENT && !err[0]);
+    CHECK(hal_config_validate(&c, err, sizeof(err)) == HAL_OK && !err[0]);
+    CHECK(hal_config_validate(NULL, err, 1) == HAL_ERROR_ARGUMENT && !err[0]);
     c.abi_minor = HAL_C_ABI_MINOR + 1;
-    assert(hal_config_validate(&c, NULL, 0) == HAL_ERROR_ABI);
+    CHECK(hal_config_validate(&c, NULL, 0) == HAL_ERROR_ABI);
     c = good(); c.struct_size--;
-    assert(hal_config_validate(&c, NULL, 0) == HAL_ERROR_ABI);
+    CHECK(hal_config_validate(&c, NULL, 0) == HAL_ERROR_ABI);
     c = good(); c.axes[0].estop_action = 0;
-    assert(hal_config_validate(&c, err, sizeof(err)) == HAL_ERROR_CONFIG && err[0]);
+    CHECK(hal_config_validate(&c, err, sizeof(err)) == HAL_ERROR_CONFIG && err[0]);
     c = good(); c.axes[0].command_units_per_count = NAN;
-    assert(hal_config_validate(&c, NULL, 0) == HAL_ERROR_CONFIG);
+    CHECK(hal_config_validate(&c, NULL, 0) == HAL_ERROR_CONFIG);
     c = good(); c.axis_count = 31;
-    assert(hal_config_validate(&c, NULL, 0) == HAL_ERROR_CONFIG);
+    CHECK(hal_config_validate(&c, NULL, 0) == HAL_ERROR_CONFIG);
     c = good(); c.spindle_count = 1;
     c.spindles[0].axis = c.axes[0]; c.spindles[0].max_speed = 1000;
     c.spindles[0].axis.logical_axis = 1;
-    assert(hal_config_validate(&c, NULL, 0) == HAL_ERROR_CONFIG);
+    CHECK(hal_config_validate(&c, NULL, 0) == HAL_ERROR_CONFIG);
     c.spindles[0].axis.axis_index = 1;
-    assert(hal_config_validate(&c, NULL, 0) == HAL_OK);
+    CHECK(hal_config_validate(&c, NULL, 0) == HAL_OK);
     c.spindles[0].axis.logical_axis = 0;
-    assert(hal_config_validate(&c, NULL, 0) == HAL_ERROR_CONFIG);
+    CHECK(hal_config_validate(&c, NULL, 0) == HAL_ERROR_CONFIG);
     c = good(); c.io_count = 1; c.ios[0].slave_pos = 1;
     c.panel_count = 1; c.panels[0].slave_pos = 1;
-    assert(hal_config_validate(&c, NULL, 0) == HAL_ERROR_CONFIG);
+    CHECK(hal_config_validate(&c, NULL, 0) == HAL_ERROR_CONFIG);
     c.panels[0].slave_pos = 2;
-    assert(hal_config_validate(&c, NULL, 0) == HAL_OK);
+    CHECK(hal_config_validate(&c, NULL, 0) == HAL_OK);
     c.panels[0].y_start = -1;
-    assert(hal_config_validate(&c, NULL, 0) == HAL_ERROR_CONFIG);
+    CHECK(hal_config_validate(&c, NULL, 0) == HAL_ERROR_CONFIG);
     c = good(); c.cycle_timeout_ms = 0;
-    assert(hal_config_validate(&c, NULL, 0) == HAL_ERROR_CONFIG);
+    CHECK(hal_config_validate(&c, NULL, 0) == HAL_ERROR_CONFIG);
     c = good(); c.cycle_us = UINT32_MAX;
-    assert(hal_config_validate(&c, NULL, 0) == HAL_ERROR_CONFIG);
+    CHECK(hal_config_validate(&c, NULL, 0) == HAL_ERROR_CONFIG);
     c.cycle_us = UINT32_MAX / 1000u;
-    assert(hal_config_validate(&c, NULL, 0) == HAL_OK);
+    CHECK(hal_config_validate(&c, NULL, 0) == HAL_OK);
     memset(err, 'x', sizeof(err)); hal_error_text(HAL_ERROR_STOPPED, err, sizeof(err));
-    assert(strcmp(err, "已请求停止") == 0);
+    CHECK(strcmp(err, "已请求停止") == 0);
     puts("Config regression passed");
 }

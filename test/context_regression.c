@@ -16,6 +16,7 @@ static int fail_init, fail_read, fail_write, fail_step, fail_wait, fail_send, fa
 static int wrong_type, bad_width;
 static int omit_optional, omit_spindle_speed;
 static int stuck_fault;      /* 非零 = 连复位边沿也清不掉故障，用来测超时 */
+static int force_serial_zero; /* 非零 = 桩上报 serial=0，用来测 device_id 的哈希回退 */
 static uint32_t previous_control[2];
 static unsigned reset_edges[2];
 static int ignore_first_reset_edge;
@@ -48,7 +49,7 @@ int ethercat_init(const MasterConfig* cfg) {
         slots[i].type = GREE_AXIS6_TYPE;
         slots[i].slave_pos = 0; slots[i].axis_index = i;
         slots[i].vendor_id = 123; slots[i].product_code = 456;
-        slots[i].serial = 99;
+        slots[i].serial = force_serial_zero ? 0 : 99;
         strcpy(slots[i].name, "Dual axis");
         slots[i].entries.slave.statusWord.bit_length = 16;
         slots[i].entries.slave.act_pos.bit_length = 32;
@@ -90,14 +91,13 @@ int ethercat_init(const MasterConfig* cfg) {
 int ethercat_close(void) { ++closes; opened = 0; return 0; }
 const char* Master_StartupError(void) { return ""; }
 int Master_SlaveCount(void) { return opened ? 3 : 0; }
-const DEVICE_BASIC_INFO* device_identity_get(int pos) {
-    static DEVICE_BASIC_INFO ids[3] = {
-        {.ID=123, .CODE=456, .Serial=99},
-        {.ID=2252, .CODE=269418497, .Revision=1},
-        {.ID=2252, .CODE=269418498, .Revision=1}
-    };
-    return &ids[pos];
-}
+/* 从站身份表放在文件作用域：测试要把它改成「同型号第 2 台」来验证 family_index。 */
+static DEVICE_BASIC_INFO g_ids[3] = {
+    {.ID=123, .CODE=456, .Serial=99},
+    {.ID=2252, .CODE=269418497, .Revision=1},
+    {.ID=2252, .CODE=269418498, .Revision=1}
+};
+const DEVICE_BASIC_INFO* device_identity_get(int pos) { return &g_ids[pos]; }
 int DeviceTable_Get(const DeviceSlot** out) { if (out) *out = opened ? slots : NULL; return opened ? 4 : 0; }
 void Master_RequestStop(void) { driver_stop = 1; }
 int  Master_StopFlag(void) { return driver_stop != 0; }
@@ -1013,11 +1013,63 @@ static void standard_enabled_status(void) {
     }
 }
 
+/* 2026-10-04 覆盖补强：下面四处原先被改坏也不会让任何用例变红。 */
+static void coverage_gaps(void) {
+    HalCConfig cfg;
+    HalContext* c;
+
+    /* 1) 启动超时码：MASTER_START_TIMEOUT 必须翻成 HAL_ERROR_TIMEOUT，
+     *    不是笼统的 HAL_ERROR_BUS ——上层的报警号是按码分的。 */
+    cfg = config(); c = create(&cfg);
+    fail_init = MASTER_START_TIMEOUT;
+    CHECK(hal_context_start(c, NULL, 0) == HAL_ERROR_TIMEOUT);
+    fail_init = 0;
+    CHECK(hal_context_start(c, NULL, 0) == 0);
+    hal_context_destroy(c);
+
+    /* 2) family_index：把第 2 台从站改成与第 1 台同 vendor+product，
+     *    「同型号第几台」必须从 0 变成 1。 */
+    g_ids[1].ID = g_ids[0].ID; g_ids[1].CODE = g_ids[0].CODE;
+    cfg = config(); c = create(&cfg);
+    CHECK(hal_context_start(c, NULL, 0) == 0);
+    HalCSlaveInfo slave;
+    CHECK(hal_slave_info(c, 0, &slave) == 0 && slave.identity.family_index == 0);
+    CHECK(hal_slave_info(c, 1, &slave) == 0 && slave.identity.family_index == 1);
+    CHECK(hal_slave_info(c, 2, &slave) == 0 && slave.identity.family_index == 0);
+    hal_context_destroy(c);
+    g_ids[1].ID = 2252; g_ids[1].CODE = 269418497;
+
+    /* 3) device_id 的哈希回退：serial==0 时必须是 FNV(vendor,product,revision)。
+     *    这里断言**确切数值**——只断言「非零」或「两个设备不同」都挡不住常量被改。 */
+    force_serial_zero = 1;
+    cfg = config(); c = create(&cfg);
+    CHECK(hal_context_start(c, NULL, 0) == 0);
+    HalCIdentity ident;
+    CHECK(hal_device_identity(c, 7, &ident) == 0 && ident.serial == 0);
+    CHECK(ident.device_id == UINT64_C(18014831272581144209));
+    hal_context_destroy(c);
+    force_serial_zero = 0;
+
+    /* 4) 位置写入的 CSP 闸门：主轴处于 CSV 使能态时，通用位置写入必须被拒，
+     *    否则 0x607A 会被下发给速度模式驱动器。
+     *    注：`a->mode != CSP` 那一分句在 motion_ready 成立时必然相等，是冗余保护。 */
+    cfg = config(); c = create(&cfg);
+    CHECK(hal_context_start(c, NULL, 0) == 0);
+    CHECK(hal_rt_spindle_enable(c, 3, 1) == 0);
+    for (int i = 0; i < 5; ++i) cycle(c);
+    begin(c);
+    HalCSpindleStatus ss;
+    CHECK(hal_rt_spindle_read_status(c, 3, &ss) == 0 && ss.enabled && ss.mode == HAL_SPINDLE_CSV);
+    CHECK(hal_rt_axis_write_pos(c, 3, 0.0) == HAL_ERROR_NOT_RUNNING);
+    CHECK(hal_rt_commit_cycle(c) == 0);
+    hal_context_destroy(c);
+}
+
 int main(void) {
     lifecycle(); binding(); optional_capabilities(); motion_io(); wrap_and_faults();
     stop_overrides_staged_enable(); concurrent_stop();
     preset_overflow_probe(); spindle_origin_angle(); angle_regressions();
     fault_reset_and_bus_health(); io_image_size(); review_regressions();
-    voltage_stop_priority(); standard_enabled_status();
+    voltage_stop_priority(); standard_enabled_status(); coverage_gaps();
     printf("context_regression: %u checks passed\n", checks);
 }
