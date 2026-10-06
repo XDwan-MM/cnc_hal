@@ -1,0 +1,115 @@
+--- a/src/hal/rt_hal_sim_backend.c
++++ b/src/hal/rt_hal_sim_backend.c
+@@ -13,6 +13,7 @@
+ #include <stdlib.h>
+ #include <string.h>
+ #include <time.h>
++#include <stdatomic.h>
+ 
+ #include "Greemaster/device.h"
+ #include "Greemaster/device_table.h"
+@@ -43,19 +44,16 @@
+     uint32_t target_speed;
+     uint32_t actual_speed;
+     uint16_t control_word;
++    uint16_t previous_control_word;
+     uint16_t op_mode;
+     int      fault;         /* 非零 = 该轴处于 Fault 态，直到收到复位边沿 */
+ } SimServo;
+ 
+-/* HAL 的 device.c 用到这个全局量（定义本来在 main_demo.c）。桩必须接管它，
+- * 否则链接静态库会连锁把真驱动层拉进来：
+- *   hal_context → device_identity_get → device.c.o → 需要 g_device_data
+- *   → main_demo.c.o（定义 ethercat_init 等，与桩冲突）
+- *   → 再拖进 servo_step.c.o、device_table.c.o
+- * 定义在这里之后那条链就断了。仿真本身不用它，桩用自己的槽表 s_slots。 */
++/* 驱动层所有 HAL 依赖均由桩提供，避免静态链接混入真实主站对象。 */
+ device_data_t g_device_data[MAX_DEVICE_NUM];
+ 
+ static DeviceSlot s_slots[SIM_SLOT_COUNT];
++static DEVICE_BASIC_INFO s_identity[SIM_SLOT_COUNT];
+ static SimServo   s_servo[SIM_SLOT_COUNT];
+ static uint32_t   s_io_in[SIM_IO_ENTRIES];
+ static uint32_t   s_io_out[SIM_IO_ENTRIES];
+@@ -66,7 +64,7 @@
+ static int        s_fail_bus;    /* 非零 = 所有驱动读都失败，用来验证总线故障路径 */
+ /* 驱动层的停止标志，与真实 main_demo.c 里那个对应。hal_context_request_stop()
+  * 会调 Master_RequestStop() 置它，Master_WaitCycle() 前后查它。 */
+-static int        s_stop_requested;
++static atomic_int s_stop_requested;
+ 
+ /* 控制字 → 状态字，位模式同 CiA402。 */
+ static uint16_t sim_status_from_ctrl(uint16_t cw) {
+@@ -141,7 +139,7 @@
+ }
+ 
+ /* ============================================================================
+- * 驱动层接口。签名必须与 src/Greemaster/*.h 的声明逐字一致，
++ * 驱动层接口。签名必须与 src/Greemaster 下头文件的声明逐字一致，
+  * 否则链接器会把真实现拉进来，变成"一半真一半假"。
+  * ========================================================================== */
+ 
+@@ -162,6 +160,14 @@
+     build_servo_slot(3, SIM_SLAVE_X, SERVO_TYPE, 0);
+     build_servo_slot(4, SIM_SLAVE_Y, SERVO_TYPE, 0);
+     build_servo_slot(5, SIM_SLAVE_Z, SERVO_TYPE, 0);
++    memset(s_identity, 0, sizeof(s_identity));
++    for (int i = 0; i < SIM_SLOT_COUNT; ++i) {
++        s_identity[i].ID = s_slots[i].vendor_id;
++        s_identity[i].CODE = s_slots[i].product_code;
++        s_identity[i].Revision = s_slots[i].revision;
++        s_identity[i].Serial = s_slots[i].serial;
++        s_identity[i].type = s_slots[i].type;
++    }
+ 
+     /* 周期取主站配置里的值，与实时模式同量级。 */
+     /* 面板急停信号 X8.4 低有效，X8 来自面板输入字 #2 的低字节；全零的面板输入
+@@ -208,27 +214,40 @@
+ 
+ const char* Master_StartupError(void) { return ""; }
+ 
++const DEVICE_BASIC_INFO* device_identity_get(int pos) {
++    static const DEVICE_BASIC_INFO empty;
++    return s_opened && pos >= 0 && pos < SIM_SLOT_COUNT ? &s_identity[pos] : &empty;
++}
++
++void Master_RequestStop(void) { atomic_store(&s_stop_requested, 1); }
++int Master_StopFlag(void) { return !s_opened || atomic_load(&s_stop_requested); }
++
+ int DeviceTable_Get(const DeviceSlot** out) {
+     if (out) *out = s_opened ? s_slots : NULL;
+     return s_opened ? SIM_SLOT_COUNT : 0;
+ }
+ 
+ int Master_WaitCycle(void) {
+-        /* 没有真实中断，用睡眠代替节拍。调试模式不用于时序验证。 */
++    if (!s_opened) return -1;
++    if (atomic_load(&s_stop_requested)) return MASTER_STOP_REQUESTED;
++    /* 没有真实中断，用睡眠代替节拍；等待返回后再次检查停止。 */
+     struct timespec ts;
+     ts.tv_sec = (time_t)(s_cycle_us / 1000000u);
+     ts.tv_nsec = (long)(s_cycle_us % 1000000u) * 1000L;
+     nanosleep(&ts, NULL);
+-    return 0;
++    return atomic_load(&s_stop_requested) ? MASTER_STOP_REQUESTED : 0;
+ }
+ 
+ int Master_CommitCycle(void) {
+-    /* 收到复位边沿（0x80）后清掉 fault，让 HAL 的复位状态机能走到 DONE。 */
+-    for (int i = 0; i < SIM_SLOT_COUNT; ++i)
+-        if (s_servo[i].fault && (s_servo[i].control_word & 0x0080u)) {
+-            s_servo[i].fault = 0;
+-            s_servo[i].control_word = 0;
+-        }
++    if (!s_opened) return -1;
++    if (atomic_load(&s_stop_requested)) return MASTER_STOP_REQUESTED;
++    /* 只有 bit7 上升沿清 Fault；桩不能替 HAL 修改主站的输出控制字。 */
++    for (int i = 0; i < SIM_SLOT_COUNT; ++i) {
++        SimServo* v = &s_servo[i];
++        if (v->fault && (v->control_word & 0x0080u) &&
++            !(v->previous_control_word & 0x0080u)) v->fault = 0;
++        v->previous_control_word = v->control_word;
++    }
+     return 0;
+ }
+ 

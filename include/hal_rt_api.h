@@ -22,7 +22,7 @@ extern "C" {
  *                         直到 stop/start 清掉。request_stop 只写通知、不释放资源，
  *                         仍须走 stop/destroy。
  *
- * 详细契约见 docs/rt-interface.md。 */
+ * 详细契约见 docs/api-reference.md 第 4 章「周期接口与线程约束」。 */
 
 /**
  * @brief 周期第一拍：等主站的下一个周期
@@ -57,6 +57,8 @@ int32_t hal_rt_commit_cycle(HalContext* c);
  * @brief 使能 / 去使能一根进给轴
  *
  * 去使能停在 SwitchedOn（可收指令、不带载），不是断电——要断电用 hal_rt_axis_estop。
+ * 已有撤销电压急停覆盖时，on=0 保持断电，不降成 0x07；显式 on=1 或后续拍
+ * 受理的故障复位可解除历史覆盖，同拍停止仍优先。
  * 请求发生变化会丢弃该轴尚未提交的运动指令，恢复运动须重新下发目标位置。
  *
  * @param c  已 start 的 context
@@ -96,15 +98,21 @@ int32_t hal_rt_axis_read_pos(HalContext* c, HalAxisId id, double* pos);
  * @brief 请求清除驱动器的故障（DS402 Fault Reset）
  *
  * 非阻塞：只置意图，真正的控制字边沿（0x0080）由之后的 hal_rt_begin_cycle 产生。
- * 边沿在状态字仍带 Fault 位（0x0008）时每拍重发，直到驱动器离开 Fault 或超时
- * （配置的 fault_reset_timeout_ms）。
+ * 先发送一拍 0x0000，再交替发送 0x0080/0x0000，形成完整 bit7 上升沿。
+ * Fault 消失或超时后发送 0x0000 释放 bit7；超时从首次高电平拍起算，
+ * fault_reset_timeout_ms 按 cycle_us 向上取整，热路径不取时钟。
  *
  * **终态一律是未使能**——不论成功、超时还是中途被急停打断，轴都不会自动恢复使能。
  * 要重新运动必须显式 hal_rt_axis_enable()，且要再经一次 begin 确认状态机到位。
  * 这是有意的：驱动器刚从故障恢复时自动上使能是危险的。
  *
- * 幂等：重复调用等于刷新一次请求（超时重新计时）。
- * 急停优先：请求复位期间调 hal_rt_axis_estop() 会覆盖它，安全路径不被复位流程挡住。
+ * 重复调用刷新请求：从低电平准备阶段重新开始，首次高电平拍重新计超时；
+ * 刷新请求不能代替查询 hal_rt_axis_fault_reset_state()。
+ * 急停/去使能优先：同拍已有停止请求时返回 HAL_ERROR_STATE；复位期间的停止
+ * 取消复位，状态回到 HAL_RESET_NONE。后续拍可显式请求复位，仍不会自动使能。
+ * 后续拍受理复位会清除此前急停/去使能的停止动作覆盖（stop_override）。
+ * 一次停止请求不是永久闩锁；持续急停须每拍请求停止，条件解除前禁止发起复位。
+ * 复位 PENDING 时使能返回 HAL_ERROR_NOT_RUNNING；停止通知/总线闭锁按公共码拒绝。
  *
  * @param c  已 start 的 context
  * @param id 逻辑轴号

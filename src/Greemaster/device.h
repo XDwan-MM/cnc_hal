@@ -23,11 +23,6 @@
     } \
 } while (0)
 
-#define SYNC0_CYCLE 1000000   
-#define SYNC0_SHIFT 500000                  
-#define SYNC1_CYCLE 0                
-#define SYNC1_SHIFT 0 
-
 typedef struct{
    int slave_pos;
    int slave_total;
@@ -186,7 +181,8 @@ void device_reset(void);
 /* 某台从站的 EEPROM 身份（按【从站号】索引）。越界返回一个全零的静态对象。 */
 const DEVICE_BASIC_INFO* device_identity_get(int slave_pos);
 
-int get_device_info_from_eeprom(int slave_num, DEVICE_TYPE* types);
+int get_device_info_from_eeprom(int slave_num, DEVICE_TYPE* types,
+                              uint32_t cycle_us, int dc_enable);
 int device_match(Slave_info* list, DEVICE_TYPE* type, int slave_num);
 const char* device_bind_error(void);
 #endif

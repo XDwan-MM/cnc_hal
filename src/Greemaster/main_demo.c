@@ -211,10 +211,12 @@ MASTER_API int ethercat_init(const MasterConfig* cfg) {
         printf("错误：ethercat_init() 的 cfg 为空\n");
         return -1;
     }
-    if (cfg->cycle_us < GM_MIN_CYCLE_US || !cfg->start_timeout_ms ||
+    if (cfg->cycle_us < GM_MIN_CYCLE_US || cfg->cycle_us > UINT32_MAX / 1000u ||
+        !cfg->start_timeout_ms ||
         !cfg->cycle_timeout_ms || (cfg->dc_enable != 0 && cfg->dc_enable != 1)) {
-        printf("错误：通讯周期 %u us 小于主站下限 %u us\n",
-               (unsigned)cfg->cycle_us, (unsigned)GM_MIN_CYCLE_US);
+        printf("错误：主站配置无效（周期 %u us，允许 %u..%u us；超时须非零，DC 须为 0/1）\n",
+               (unsigned)cfg->cycle_us, (unsigned)GM_MIN_CYCLE_US,
+               (unsigned)(UINT32_MAX / 1000u));
         return -1;
     }
     g_cfg = *cfg;
@@ -294,7 +296,7 @@ MASTER_API int ethercat_init(const MasterConfig* cfg) {
         printf("slave num is %d\n", slave_num);
     }
     if (startup_expired()) { rc = MASTER_START_TIMEOUT; goto err_close; }
-    rc = get_device_info_from_eeprom(slave_num, types);
+    rc = get_device_info_from_eeprom(slave_num, types, cfg->cycle_us, cfg->dc_enable);
     CHECK_RC(rc, "读取或解析 EEPROM 失败", err_close);
 
     // 计算PDO映射

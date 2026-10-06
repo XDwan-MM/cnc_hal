@@ -1,5 +1,8 @@
 # GreeMaster 驱动层
 
+> 2026-10-04 修复记录见 [HAL 审查修复记录](../../docs/review/2026-10-04-HAL审查修复记录.md)。
+> 上使能前重新预置位置；HAL 运行层负责复位低/高脉冲；从站 DC 参数由启动配置传入。
+
 HAL 内部的主站驱动层。源码原本是封装侧的独立包（`DEMO_LIB_AUTO_0920`），2026-09-21
 被吸收进 HAL 工程并改造。**原始副本仍留在 `/home/mxh/CNC/DEMO_LIB_AUTO_0920` 作对照。**
 
@@ -168,7 +171,10 @@ custom 伺服必须提供实际模式 mode_display，对象位宽及收发方向
 
 ## 五、对 HAL 的接口（15 个）
 
-`export.h` 的 `MASTER_API` + 编译时 `-fvisibility=hidden`，把其余 70 多个内部符号全挡住。
+本层**单独交付**时用 `export.h` 的 `MASTER_API` + 编译时 `-fvisibility=hidden`，
+把其余 70 多个内部符号全挡住。HAL 自身的库目标**不加**这个 flag——它靠
+`cmake/hal.exports` 的 version script 隐藏内部符号；给该目标加上会让 `hal_*`
+公共 ABI 一起消失。
 
 ### 启动配置：`MasterConfig`
 
@@ -306,4 +312,5 @@ python3 test/run_driver_tests.py
 超时公开为毫秒，按 SDK 头声明的整数秒向上取整。启动共用单调时钟截止时间，
 不可中断 SDK 调用返回后才能检查是否超时。RequestStop 后 Wait/Commit 返回
 MASTER_STOP_REQUESTED；Wait 已在 SDK 内时先等 SDK 返回，不继续收帧。
-详见 docs/driver-validation.md。
+离线回归入口见 `test/run_driver_tests.py`；验收记录见
+`docs/review/2026-10-04-HAL审查修复记录.md` 第 4 节。

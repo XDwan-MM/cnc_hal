@@ -18,6 +18,24 @@ static Ds402Step step_enable(uint16_t sw, uint16_t mode) {
 int main(void) {
     Ds402Step s;
 
+    /* 独立按 CiA 402 状态编码核查所有 16 位输入；bit4/bit9 不是使能态的条件。
+     * bit5 必须保留，否则会把 QuickStopActive 当成 OperationEnabled。 */
+    int enabled_ok = 1, disable_ok = 1, mode_ok = 1;
+    for (uint32_t raw = 0; raw <= UINT16_MAX; ++raw) {
+        const int enabled = (raw & 0x006Fu) == 0x0027u;
+        s = step_enable((uint16_t)raw, DS402_MODE_CSP);
+        if ((s.kind == DS402_STEP_DONE) != enabled) enabled_ok = 0;
+        s = Ds402_NextStepReq((uint16_t)raw, DS402_MODE_CSP, DS402_REQ_DISABLE,
+                             DS402_MODE_CSP, DS402_MODESW_DISABLE_FIRST);
+        if ((s.kind == DS402_STEP_DISABLE_OP) != enabled) disable_ok = 0;
+        s = Ds402_NextStepReq((uint16_t)raw, DS402_MODE_CSV, DS402_REQ_ENABLE,
+                             DS402_MODE_CSP, DS402_MODESW_DISABLE_FIRST);
+        if ((s.kind == DS402_STEP_DISABLE_OP) != enabled) mode_ok = 0;
+    }
+    chk(enabled_ok, "全部 65536 状态字：使能事实符合 CiA 402");
+    chk(disable_ok, "全部 65536 状态字：去使能识别一致");
+    chk(mode_ok, "全部 65536 状态字：切模式前去使能识别一致");
+
     printf("四个稳定状态字（照 cnc_rt Master_Run 的掩码）：\n");
     s = step_enable(0x0040, DS402_MODE_CSP);
     chk(s.kind == DS402_STEP_SHUTDOWN,   "0x40  SwitchOnDisabled → SHUTDOWN");
@@ -34,7 +52,7 @@ int main(void) {
     s = step_enable(0x0023, DS402_MODE_CSP);
     chk(s.kind == DS402_STEP_ENABLE_OP,  "0x23  SwitchedOn       → ENABLE_OP");
     chk(s.control_word == 0x000F,        "      控制字 = 0x0F");
-    chk(s.preset_target == 0,            "      不预置");
+    chk(s.preset_target == 1,            "      上使能前重建位置目标");
 
     s = step_enable(0x0237, DS402_MODE_CSP);
     chk(s.kind == DS402_STEP_DONE,       "0x237 OperationEnabled → DONE");

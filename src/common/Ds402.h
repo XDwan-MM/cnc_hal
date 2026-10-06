@@ -25,15 +25,16 @@ extern "C" {
 #define DS402_MODE_CSV      0x09u
 
 /* 状态字 0x6041 的判定掩码。
- * 对可选位（bit4 电压有效 / bit5 快停 / bit9 远程）保持宽松——部分固件不置这些位。 */
+ * bit4 电压有效 / bit9 远程不参与状态编码。
+ * bit5 必须参与使能态判定，避免把 QuickStopActive 当成 OperationEnabled。 */
 #define DS402_SW_MASK_SWITCH_ON_DISABLED 0x004Fu
 #define DS402_SW_VAL_SWITCH_ON_DISABLED  0x0040u
 #define DS402_SW_MASK_READY_TO_SWITCH_ON 0x006Fu
 #define DS402_SW_VAL_READY_TO_SWITCH_ON  0x0021u
 #define DS402_SW_MASK_SWITCHED_ON        0x006Fu
 #define DS402_SW_VAL_SWITCHED_ON         0x0023u
-#define DS402_SW_MASK_OP_ENABLED         0x027Fu
-#define DS402_SW_VAL_OP_ENABLED          0x0237u
+#define DS402_SW_MASK_OP_ENABLED         0x006Fu
+#define DS402_SW_VAL_OP_ENABLED          0x0027u
 
 typedef enum {
     DS402_STEP_NONE = 0,      /* 不动 */
@@ -115,6 +116,8 @@ static inline Ds402Step Ds402_NextStepReq(uint16_t status_word, uint16_t current
             else {
                 s.kind         = DS402_STEP_ENABLE_OP;
                 s.control_word = DS402_CW_ENABLE_OP;
+                /* 去使能保留了驱动器旧目标；重新上使能前必须重建保持位置。 */
+                s.preset_target = 1;
             }
         }
         else if ((status_word & DS402_SW_MASK_OP_ENABLED) == DS402_SW_VAL_OP_ENABLED) {
@@ -154,8 +157,8 @@ static inline Ds402Step Ds402_NextStepReq(uint16_t status_word, uint16_t current
         return s;
 
     case DS402_REQ_FAULT_RESET:
-        /* 清错要上升沿：只在 Fault 时写一次 0x80。
-         * 写完调用方应把请求改回 ENABLE/DISABLE，否则每拍都会重复写。 */
+        /* 单次高电平动作。HAL 运行层负责低/高交替、释放及超时，
+         * 直接使用本纯函数的调用方也必须产生完整的 bit7 上升沿。 */
         if (status_word & DS402_SW_BIT_FAULT) {
             s.kind         = DS402_STEP_FAULT_RESET;
             s.control_word = DS402_CW_FAULT_RESET;

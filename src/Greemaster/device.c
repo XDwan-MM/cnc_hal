@@ -282,7 +282,7 @@ int build_chain_from_raw_data(Slave_info** slave_ptr,
 }
 
 static int COERequestResult(const DEVICE_BASIC_INFO* info, const unsigned char* data,
-                            int slave_pos, size_t bytes) {
+                            int slave_pos, size_t bytes, uint32_t cycle_us, int dc_enable) {
     const int slots = device_slot_count((DEVICE_TYPE)info->type);
     if (position < 0 || slots > MAX_DEVICE_NUM - position) return -1;
     int have_tx = 0, have_rx = 0;
@@ -317,11 +317,15 @@ static int COERequestResult(const DEVICE_BASIC_INFO* info, const unsigned char* 
     if (!slave) return -1;
     slave->Vendorid = info->ID;
     slave->ProductCode = info->CODE;
-    slave->sync_assign_activate = 0x300; // TODO 某些io面板不支持DC，暂时写死0x300，后续可根据设备类型判断
-    slave->sync0_cycle = SYNC0_CYCLE;
-    slave->sync0_shift = SYNC0_SHIFT;
-    slave->sync1_cycle = SYNC1_CYCLE;
-    slave->sync1_shift = SYNC1_SHIFT;
+    /* SDK 映射使用 ns；保持原有半周期相移策略，周期来自调用方配置。
+     * dc_enable 是整条总线的开关；逐设备 DC 支持能力仍须现场核对。
+     * 保留旧 activate=0x300；SYNC1 字段为 0 不等于关闭 SYNC1。
+     * 是否应只启用 SYNC0（0x100）须结合 SDK/设备手册及上机结果确认。 */
+    slave->sync_assign_activate = dc_enable ? 0x300u : 0u;
+    slave->sync0_cycle = dc_enable ? cycle_us * 1000u : 0u;
+    slave->sync0_shift = dc_enable ? cycle_us * 500u : 0u;
+    slave->sync1_cycle = 0;
+    slave->sync1_shift = 0;
     slave->slave_total = info->slave_total;
     slave->sm_num = (tx.count != 0) + (rx.count != 0);
     slave->slave_len = tx_bits + rx_bits;
@@ -593,8 +597,11 @@ static uint32_t read_u32_le(const unsigned char* p) {
            ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
-int get_device_info_from_eeprom(int slave_num, DEVICE_TYPE* types) {
+int get_device_info_from_eeprom(int slave_num, DEVICE_TYPE* types,
+                              uint32_t cycle_us, int dc_enable) {
     if (slave_num < 0 || slave_num > MAX_DEVICE_NUM || (slave_num && !types)) return -1;
+    if (cycle_us < 250u || cycle_us > UINT32_MAX / 1000u ||
+        (dc_enable != 0 && dc_enable != 1)) return -1;
     device_reset();
     const size_t buffer_size = 4 * 1024 * 1024;
     for (int i = 0; i < slave_num; ++i) {
@@ -618,7 +625,7 @@ int get_device_info_from_eeprom(int slave_num, DEVICE_TYPE* types) {
             types[i] = get_device_types_from_info(&info);
             info.type = types[i];
             g_slave_identity[i] = info;
-            rc = COERequestResult(&info, memory, i, actual_bytes);
+            rc = COERequestResult(&info, memory, i, actual_bytes, cycle_us, dc_enable);
         } else {
             rc = -1;
         }

@@ -28,7 +28,8 @@ int32_t hal_slave_count(const HalContext*);
  * 拷多少。以前只能照抄一个硬编码的数字，设备一改就静默错位。有了它，
  * 段长完全由设备决定，调用方与 HAL 不会再有第二套理解。
  *
- * 未 start 时为 0（此时还没枚举设备）。与周期线程并发调用时须由调用方同步。 */
+ * 未 start 时返回 HAL_ERROR_NOT_RUNNING，出参不改。
+ * 与周期线程并发调用时须由调用方同步。 */
 int32_t hal_io_image_size(const HalContext*, uint32_t* x_size, uint32_t* y_size);
 /* 取最近一次收帧的总线健康快照。只记录不判断，报警策略归上层。
  * 与周期线程并发调用时须由调用方同步（与本文档其余非周期查询同一条约定）。 */

@@ -16,6 +16,9 @@ static int fail_init, fail_read, fail_write, fail_step, fail_wait, fail_send, fa
 static int wrong_type, bad_width;
 static int omit_optional, omit_spindle_speed;
 static int stuck_fault;      /* 非零 = 连复位边沿也清不掉故障，用来测超时 */
+static uint32_t previous_control[2];
+static unsigned reset_edges[2];
+static int ignore_first_reset_edge;
 /* 驱动层的停止标志，**独立于 HAL 那份**——真实驱动层有自己的一个（main_demo.c:17），
  * Master_RequestStop() 置它、Master_WaitCycle() 前后查它。这里照抄这个结构，
  * 才能验出"HAL 的 request_stop 有没有透传到驱动层"。 */
@@ -38,6 +41,8 @@ int ethercat_init(const MasterConfig* cfg) {
     driver_stop = 0;   /* 与真实 ethercat_init 一致：每次启动清停止标志 */
     memset(slots, 0, sizeof(slots));
     memset(servo, 0, sizeof(servo));
+    memset(previous_control, 0, sizeof(previous_control));
+    memset(reset_edges, 0, sizeof(reset_edges));
     memset(output, 0, sizeof(output));
     for (int i = 0; i < 2; ++i) {
         slots[i].type = GREE_AXIS6_TYPE;
@@ -109,15 +114,21 @@ int Master_CommitCycle(void) {
     ++sends;
     if (fail_send) return -1;
     for (int i = 0; i < 2; ++i) {
-        switch (servo[i][DEV_DICT_ROLE_CONTROL_WORD]) {
+        const uint32_t control = servo[i][DEV_DICT_ROLE_CONTROL_WORD];
+        const int rising_reset = (control & 128u) && !(previous_control[i] & 128u);
+        if (rising_reset) ++reset_edges[i];
+        if (servo[i][DEV_DICT_ROLE_STATUS_WORD] & 8u) {
+            /* 故障只能由复位上升沿解除；0/7/15 不能把故障伪装成已恢复。 */
+            if (rising_reset && !stuck_fault &&
+                (!ignore_first_reset_edge || reset_edges[i] > 1))
+                servo[i][DEV_DICT_ROLE_STATUS_WORD] = 0x40;
+        } else switch (control) {
         case 0: servo[i][DEV_DICT_ROLE_STATUS_WORD] = 0x40; break;
         case 6: servo[i][DEV_DICT_ROLE_STATUS_WORD] = 0x21; break;
         case 7: servo[i][DEV_DICT_ROLE_STATUS_WORD] = 0x23; break;
         case 15: servo[i][DEV_DICT_ROLE_STATUS_WORD] = 0x237; break;
-        /* 0x80 = 故障复位边沿。真实驱动器收到边沿且故障确实消失后，会回到
-         * SwitchOnDisabled。stuck_fault 用来模拟"边沿发了但故障还在"。 */
-        case 128: if (!stuck_fault) servo[i][DEV_DICT_ROLE_STATUS_WORD] = 0x40; break;
         }
+        previous_control[i] = control;
         servo[i][DEV_DICT_ROLE_MODE_DISPLAY] = servo[i][DEV_DICT_ROLE_OP_MODE];
     }
     return 0;
@@ -744,7 +755,8 @@ static void fault_reset_and_bus_health(void) {
     CHECK(hal_rt_commit_cycle(c) == 0);
 
     /* 下一拍 begin 才发出 0x80 边沿，该拍 commit 里 mock 让驱动器离开 Fault */
-    cycle(c);
+    cycle(c); /* 先发送低电平 */
+    cycle(c); /* 再发送复位上升沿 */
     /* 再下一拍 begin 采样到已离开 Fault → DONE，且请求被改成 DISABLE */
     begin(c);
     CHECK(hal_rt_axis_fault_reset_state(c, 7, &st) == 0 && st == HAL_RESET_DONE);
@@ -804,10 +816,208 @@ static void io_image_size(void) {
     hal_context_destroy(c);
 }
 
+/* 2026-10-04 审查：隔离停止、重使能、复位边沿/超时/急停组合和速度方向。 */
+static void review_regressions(void) {
+    HalCConfig cfg = config();
+    HalContext* c = create(&cfg);
+    HalContext* idle = create(&cfg);
+    CHECK(hal_context_start(c, NULL, 0) == 0);
+    CHECK(hal_context_request_stop(idle) == 0 && !driver_stop);
+    cycle(c);
+    hal_context_destroy(idle);
+    hal_context_destroy(c);
+
+    cfg.axes[0].feedback_units_per_count = cfg.axes[0].command_units_per_count;
+    c = create(&cfg); CHECK(hal_context_start(c, NULL, 0) == 0);
+    servo[1][DEV_DICT_ROLE_STATUS_WORD] = 0x23;
+    servo[1][DEV_DICT_ROLE_CONTROL_WORD] = 7;
+    servo[1][DEV_DICT_ROLE_TARGET_POS] = 9000;
+    begin(c); CHECK(hal_rt_axis_enable(c, 7, 1) == 0);
+    CHECK(hal_rt_commit_cycle(c) == 0);
+    begin(c);
+    CHECK(servo[1][DEV_DICT_ROLE_TARGET_POS] == 100);
+    CHECK(servo[1][DEV_DICT_ROLE_CONTROL_WORD] == 15);
+    CHECK(hal_rt_commit_cycle(c) == 0);
+    begin(c); CHECK(hal_rt_axis_write_pos(c, 7, 900) == 0);
+    CHECK(hal_rt_commit_cycle(c) == 0);
+    begin(c); CHECK(hal_rt_axis_enable(c, 7, 0) == 0);
+    CHECK(hal_rt_commit_cycle(c) == 0);
+    begin(c); CHECK(hal_rt_axis_enable(c, 7, 1) == 0);
+    CHECK(hal_rt_commit_cycle(c) == 0);
+    begin(c);
+    CHECK(servo[1][DEV_DICT_ROLE_TARGET_POS] == 100);
+    CHECK(hal_rt_commit_cycle(c) == 0);
+    hal_context_destroy(c);
+
+    for (int action = 0; action < 3; ++action) {
+        cfg = config(); cfg.fault_reset_timeout_ms = 5;
+        if (action == 2) cfg.axes[0].estop_action = HAL_ESTOP_DISABLE_VOLTAGE;
+        c = create(&cfg); CHECK(hal_context_start(c, NULL, 0) == 0);
+        begin(c);
+        if (!action) CHECK(hal_rt_axis_enable(c, 7, 0) == 0);
+        else CHECK(hal_rt_axis_estop(c, 7) == 0);
+        CHECK(hal_rt_axis_fault_reset(c, 7) == HAL_ERROR_STATE); /* 同拍停止优先 */
+        CHECK(hal_rt_commit_cycle(c) == 0);
+        for (int attempt = 0; attempt < 2; ++attempt) {
+            servo[1][DEV_DICT_ROLE_STATUS_WORD] = 8;
+            begin(c); CHECK(hal_rt_axis_fault_reset(c, 7) == 0);
+            CHECK(hal_rt_commit_cycle(c) == 0);
+            int32_t state = HAL_RESET_PENDING;
+            for (int n = 0; n < 10 && state == HAL_RESET_PENDING; ++n) {
+                cycle(c); CHECK(hal_rt_axis_fault_reset_state(c, 7, &state) == 0);
+            }
+            CHECK(state == HAL_RESET_DONE);
+            CHECK(reset_edges[1] == (unsigned)attempt + 1);
+            CHECK(!(servo[1][DEV_DICT_ROLE_CONTROL_WORD] & 128u));
+            HalCAxisStatus status;
+            CHECK(hal_rt_axis_read_status(c, 7, &status) == 0 && !status.enabled);
+        }
+        hal_context_destroy(c);
+    }
+
+    cfg = config(); cfg.fault_reset_timeout_ms = 1;
+    c = create(&cfg); CHECK(hal_context_start(c, NULL, 0) == 0);
+    stuck_fault = 1; servo[1][DEV_DICT_ROLE_STATUS_WORD] = 8;
+    begin(c); CHECK(hal_rt_axis_fault_reset(c, 7) == 0);
+    CHECK(hal_rt_commit_cycle(c) == 0);
+    cycle(c); CHECK(reset_edges[1] == 0);
+    cycle(c); CHECK(reset_edges[1] == 1);
+    cycle(c);
+    int32_t state;
+    CHECK(hal_rt_axis_fault_reset_state(c, 7, &state) == 0 && state == HAL_RESET_TIMEOUT);
+    CHECK(!(servo[1][DEV_DICT_ROLE_CONTROL_WORD] & 128u));
+    stuck_fault = 0; hal_context_destroy(c);
+
+    cfg = config(); cfg.cycle_us = 1500; cfg.fault_reset_timeout_ms = 2;
+    c = create(&cfg); CHECK(hal_context_start(c, NULL, 0) == 0);
+    stuck_fault = 1; servo[1][DEV_DICT_ROLE_STATUS_WORD] = 8;
+    begin(c); CHECK(hal_rt_axis_fault_reset(c, 7) == 0);
+    CHECK(hal_rt_commit_cycle(c) == 0);
+    cycle(c); cycle(c); cycle(c);
+    CHECK(hal_rt_axis_fault_reset_state(c, 7, &state) == 0 && state == HAL_RESET_PENDING);
+    cycle(c);
+    CHECK(hal_rt_axis_fault_reset_state(c, 7, &state) == 0 && state == HAL_RESET_TIMEOUT);
+    stuck_fault = 0; hal_context_destroy(c);
+
+    cfg = config(); cfg.fault_reset_timeout_ms = 10;
+    c = create(&cfg); CHECK(hal_context_start(c, NULL, 0) == 0);
+    ignore_first_reset_edge = 1; servo[1][DEV_DICT_ROLE_STATUS_WORD] = 8;
+    begin(c); CHECK(hal_rt_axis_fault_reset(c, 7) == 0);
+    CHECK(hal_rt_commit_cycle(c) == 0);
+    for (int n = 0; n < 6; ++n) cycle(c);
+    CHECK(reset_edges[1] == 2);
+    CHECK(hal_rt_axis_fault_reset_state(c, 7, &state) == 0 && state == HAL_RESET_DONE);
+    ignore_first_reset_edge = 0;
+    begin(c); CHECK(hal_context_request_stop(c) == 0);
+    CHECK(hal_rt_axis_fault_reset(c, 7) == HAL_ERROR_STOPPED);
+    hal_context_destroy(c);
+
+    c = create(&cfg); CHECK(hal_context_start(c, NULL, 0) == 0);
+    begin(c); fail_send = 1;
+    CHECK(hal_rt_commit_cycle(c) == HAL_ERROR_BUS); fail_send = 0;
+    CHECK(hal_rt_axis_fault_reset(c, 7) == HAL_ERROR_BUS);
+    hal_context_destroy(c);
+
+    for (int stop = 0; stop < 3; ++stop) {
+        cfg = config();
+        if (stop == 2) cfg.axes[0].estop_action = HAL_ESTOP_DISABLE_VOLTAGE;
+        c = create(&cfg); CHECK(hal_context_start(c, NULL, 0) == 0);
+        stuck_fault = 1; servo[1][DEV_DICT_ROLE_STATUS_WORD] = 8;
+        begin(c); CHECK(hal_rt_axis_fault_reset(c, 7) == 0);
+        CHECK(hal_rt_axis_enable(c, 7, 1) == HAL_ERROR_NOT_RUNNING);
+        CHECK(hal_rt_commit_cycle(c) == 0);
+        cycle(c); begin(c); /* 本拍已暂存高电平，停止必须在 commit 覆盖它 */
+        CHECK(servo[1][DEV_DICT_ROLE_CONTROL_WORD] == 128);
+        if (!stop) CHECK(hal_rt_axis_enable(c, 7, 0) == 0);
+        else CHECK(hal_rt_axis_estop(c, 7) == 0);
+        CHECK(hal_rt_axis_fault_reset_state(c, 7, &state) == 0 && state == HAL_RESET_NONE);
+        CHECK(hal_rt_axis_fault_reset(c, 7) == HAL_ERROR_STATE);
+        CHECK(hal_rt_commit_cycle(c) == 0);
+        const uint32_t stop_word = stop == 2 ? 0 : 7;
+        CHECK(servo[1][DEV_DICT_ROLE_CONTROL_WORD] == stop_word && reset_edges[1] == 0);
+        cycle(c); CHECK(servo[1][DEV_DICT_ROLE_CONTROL_WORD] == stop_word);
+        stuck_fault = 0; hal_context_destroy(c);
+    }
+
+    /* 固定原始反馈 +100 是合成输入，只检查命令/反馈的符号换算和 at_speed 口径。
+     * 模拟器不随命令生成真实速度；四组合包含命令与反馈方向不一致的输入。
+     * at_speed == !feedback 不能证明任意方向组合在实机上有效；实际极性须按接线核对。 */
+    for (int command = 0; command < 2; ++command) for (int feedback = 0; feedback < 2; ++feedback) {
+        cfg = config(); cfg.spindles[0].axis.command_invert = command;
+        cfg.spindles[0].axis.feedback_invert = feedback;
+        c = create(&cfg); CHECK(hal_context_start(c, NULL, 0) == 0); enable(c);
+        servo[0][DEV_DICT_ROLE_ACTUAL_SPEED] = 100;
+        begin(c); double rpm;
+        CHECK(hal_rt_spindle_read_speed(c, 3, &rpm) == 0 && rpm == (feedback ? -100 : 100));
+        CHECK(hal_rt_spindle_write_speed(c, 3, 100, 1) == 0);
+        HalCSpindleStatus speed_status;
+        CHECK(hal_rt_spindle_read_status(c, 3, &speed_status) == 0);
+        CHECK(speed_status.command_speed == 100 && speed_status.at_speed == !feedback);
+        CHECK(hal_rt_commit_cycle(c) == 0);
+        CHECK(servo[0][DEV_DICT_ROLE_TARGET_SPEED] == (command ? (uint32_t)-100 : 100));
+        begin(c); CHECK(hal_rt_spindle_write_speed(c, 3, 100, -1) == 0);
+        CHECK(hal_rt_spindle_read_status(c, 3, &speed_status) == 0);
+        CHECK(speed_status.command_speed == -100 && speed_status.at_speed == feedback);
+        CHECK(hal_rt_commit_cycle(c) == 0);
+        CHECK(servo[0][DEV_DICT_ROLE_TARGET_SPEED] == (command ? 100 : (uint32_t)-100));
+        hal_context_destroy(c);
+    }
+}
+
+static void voltage_stop_priority(void) {
+    for (int order = 0; order < 2; ++order) {
+        HalCConfig cfg = config(); cfg.axes[0].estop_action = HAL_ESTOP_DISABLE_VOLTAGE;
+        HalContext* c = create(&cfg);
+        CHECK(hal_context_start(c, NULL, 0) == 0); enable(c);
+        begin(c);
+        if (order) CHECK(hal_rt_axis_enable(c, 7, 0) == 0);
+        CHECK(hal_rt_axis_estop(c, 7) == 0);
+        if (!order) CHECK(hal_rt_axis_enable(c, 7, 0) == 0);
+        CHECK(hal_rt_commit_cycle(c) == 0);
+        CHECK(servo[1][DEV_DICT_ROLE_CONTROL_WORD] == 0);
+        for (int n = 0; n < 3; ++n) {
+            begin(c); CHECK(hal_rt_axis_enable(c, 7, 0) == 0);
+            CHECK(hal_rt_commit_cycle(c) == 0);
+            CHECK(servo[1][DEV_DICT_ROLE_CONTROL_WORD] == 0);
+            CHECK(servo[1][DEV_DICT_ROLE_STATUS_WORD] == 0x40);
+        }
+        /* 显式重新上使能仍可解除历史停止；去使能不能代替这个显式动作。 */
+        CHECK(hal_rt_axis_enable(c, 7, 1) == 0);
+        for (int n = 0; n < 4; ++n) cycle(c);
+        HalCAxisStatus status;
+        CHECK(hal_rt_axis_read_status(c, 7, &status) == 0 && status.enabled);
+        hal_context_destroy(c);
+    }
+}
+
+static void standard_enabled_status(void) {
+    const uint16_t words[] = {0x0027, 0x0037, 0x0227, 0x0237};
+    for (unsigned i = 0; i < sizeof(words) / sizeof(words[0]); ++i) {
+        HalCConfig cfg = config(); HalContext* c = create(&cfg);
+        CHECK(hal_context_start(c, NULL, 0) == 0); enable(c);
+        servo[0][DEV_DICT_ROLE_STATUS_WORD] = servo[1][DEV_DICT_ROLE_STATUS_WORD] = words[i];
+        begin(c);
+        HalCAxisStatus status; HalCSpindleStatus spindle;
+        CHECK(hal_rt_axis_read_status(c, 7, &status) == 0 && status.enabled);
+        CHECK(hal_rt_spindle_read_status(c, 3, &spindle) == 0 && spindle.enabled);
+        CHECK(hal_rt_axis_write_pos(c, 7, 25) == 0);
+        CHECK(hal_rt_spindle_write_speed(c, 3, 100, 1) == 0);
+        CHECK(hal_rt_commit_cycle(c) == 0);
+        servo[0][DEV_DICT_ROLE_STATUS_WORD] = servo[1][DEV_DICT_ROLE_STATUS_WORD] = 0x0007;
+        begin(c);
+        CHECK(hal_rt_axis_read_status(c, 7, &status) == 0 && !status.enabled);
+        CHECK(hal_rt_axis_write_pos(c, 7, 25) == HAL_ERROR_NOT_RUNNING);
+        CHECK(hal_rt_spindle_write_speed(c, 3, 100, 1) == HAL_ERROR_NOT_RUNNING);
+        CHECK(hal_rt_commit_cycle(c) == 0);
+        hal_context_destroy(c);
+    }
+}
+
 int main(void) {
     lifecycle(); binding(); optional_capabilities(); motion_io(); wrap_and_faults();
     stop_overrides_staged_enable(); concurrent_stop();
     preset_overflow_probe(); spindle_origin_angle(); angle_regressions();
-    fault_reset_and_bus_health(); io_image_size();
+    fault_reset_and_bus_health(); io_image_size(); review_regressions();
+    voltage_stop_priority(); standard_enabled_status();
     printf("context_regression: %u checks passed\n", checks);
 }

@@ -1,6 +1,10 @@
 # CNC HAL C API 接口文档
 
 适用范围：当前公开 C ABI 5.0（`HAL_C_ABI_MAJOR=5`，`HAL_C_ABI_MINOR=0`）。
+> 2026-10-04 修复重新使能、故障复位、停止隔离、CSV 方向和 DC 配置传递。
+> 原因、复现及验收证据见 [HAL 审查修复记录](review/2026-10-04-HAL审查修复记录.md)。
+> 同日二次审查已修正使能状态掩码和撤销电压停止优先级；最新结果与 RT 候选接入验证见
+> [HAL 二次审查与 RT 接入准备](review/2026-10-04-HAL二次审查与RT接入准备.md)。
 > **5.0 相对 4.0 的变化**：新增 `hal_io_image_size()`。函数增删按本工程的版本策略属
 > MAJOR，消费者须重编。
 >
@@ -61,7 +65,7 @@ if (rc == HAL_OK) {
 | `struct_size` | `uint16_t` | 必须 `== sizeof(HalCConfig)`，**精确相等**而不是「至少」—— 它是唯一能挡住字段插入的检查。 |
 | `reserved` | `uint16_t` | 必须为 `0`。显式填充位，不依赖编译器对齐。 |
 | `topology_fingerprint` | `uint64_t` | **当前必须为 `0`**。指纹算法未定，非零值会被直接拒绝，**不会静默跳过比对**。 |
-| `cycle_us` | `uint32_t` | 主站通讯周期，单位微秒。**至少 `250`**。 |
+| `cycle_us` | `uint32_t` | 主站通讯周期，单位微秒。范围 `250..4294967`；上限保证从站 DC 纳秒字段不溢出。 |
 | `start_timeout_ms` | `uint32_t` | 非零。**整个启动过程共用的总预算**，不是每阶段各用一次完整超时。各阶段共用一份单调时钟截止时间，后续等待只消耗剩余预算。 |
 | `cycle_timeout_ms` | `uint32_t` | 非零。等待周期节拍的超时，单位毫秒。 |
 | `dc_enable` | `int32_t` | `0` 或 `1`，是否启用分布式时钟。**启动时确定，运行期间不可改**。 |
@@ -99,8 +103,8 @@ IO／面板也不能与伺服重复占用同一从站。
 | `feedback_wrap` | `int32_t` | `HAL_WRAP_LINEAR`(0) 线性计数 / `HAL_WRAP_MODULAR`(1) 模循环。见下方说明。 |
 | `command_units_per_count` | `double` | **命令当量**，单位「用户单位／命令计数」，有限且 `> 0`。例：已知 1 mm 对应 10000 个命令计数，就填 `0.0001`。 |
 | `feedback_units_per_count` | `double` | **反馈当量**，单位「用户单位／反馈计数」，有限且 `> 0`。**可与命令当量不同** —— 外接编码器或光栅尺可能只翻反馈侧。 |
-| `command_invert` | `int32_t` | 非零 = 命令方向取反。 |
-| `feedback_invert` | `int32_t` | 非零 = 反馈方向取反。**与命令分开配置**，理由同上。 |
+| `command_invert` | `int32_t` | 非零 = 位置及主轴 CSV 转速命令方向取反。 |
+| `feedback_invert` | `int32_t` | 非零 = 位置及主轴 CSV 转速反馈方向取反。**与命令分开配置**，理由同上。 |
 | `enc_off` | `double` | 已保存的坐标偏置，单位 mm（直线轴）或 deg（回转轴），须有限。**初始显示坐标 = 原始反馈换算值 − 该偏置**，沿用旧 RT 的符号约定。它是**软件偏置，不会写入驱动器的电子齿轮对象**。运行时重新标定请用 `hal_rt_axis_set_pos()`。 |
 
 **关于 `feedback_wrap` 的选型**：
@@ -939,20 +943,27 @@ int32_t hal_rt_axis_fault_reset(HalContext* c, HalAxisId id);
 请求清除驱动器故障，走 DS402 的 Fault Reset（控制字 bit7 = 0x80）。
 
 - **非阻塞**：只置意图，真正的边沿由之后的 `hal_rt_begin_cycle()` 产生。
-- **边沿在状态字仍带 Fault 位（0x0008）时每拍重发**，直到驱动器离开 Fault，或超过
-  配置的 `fault_reset_timeout_ms`。
+- 首次先发送 `0x0000`，之后交替发送 `0x0080` / `0x0000`。Fault 未解除时生成新的
+  bit7 上升沿；成功或超时后也发送 `0x0000` 释放 bit7，允许下一次故障再次复位。
 - **终态一律是未使能**。不论成功、超时还是中途被急停打断，轴都不会自动恢复使能。
   要重新运动必须显式 `hal_rt_axis_enable()`，并再经一次 begin 确认状态机到位。
   这是有意的：驱动器刚从故障恢复时自动上使能是危险的。
-- **幂等**：重复调用等于刷新一次请求（超时重新计时）。
-- **急停优先**：复位期间调 `hal_rt_axis_estop()` 会覆盖它，安全路径不被复位流程挡住。
+- **重复调用刷新请求**：重新从低电平准备阶段开始，首次高电平重新计超时。
+- **急停/去使能优先**：同拍已有显式停止时，复位返回 `HAL_ERROR_STATE`；复位期间
+  停止会取消复位，状态回到 `HAL_RESET_NONE`。后续拍可显式发起新复位，仍不使能。
+- **复位会清除历史停止动作覆盖**：后续拍受理复位时，会清除此前急停/去使能留下的
+  `stop_override`，让复位控制字可以发送；这不会恢复使能。一次停止请求并非永久闩锁，
+  HMI/报警上层若仍要求持续急停，应每拍请求停止，并在急停条件解除前禁止发起复位。
+- 复位 `PENDING` 时，使能请求返回 `HAL_ERROR_NOT_RUNNING`。
 - 调用会丢弃该轴尚未提交的运动指令（与急停同理）。
 
 只在「本拍已 begin 且未 commit」时受理。返回 `HAL_OK`；不在该窗口返回
-`HAL_ERROR_STATE`；轴号不存在返回 `HAL_ERROR_ARGUMENT`。
+`HAL_ERROR_STATE`；轴号不存在返回 `HAL_ERROR_ARGUMENT`。已请求停止返回
+`HAL_ERROR_STOPPED`，总线闭锁返回 `HAL_ERROR_BUS`，未启动返回 `HAL_ERROR_NOT_RUNNING`。
 
-超时按**周期数**计（`fault_reset_timeout_ms × 1000 ÷ cycle_us`，至少 1 拍），
-热路径上不取时钟。
+超时按**周期数**计：`ceil(fault_reset_timeout_ms × 1000 ÷ cycle_us)`，至少 1 拍，
+从首次高电平所在拍起算。低电平准备拍不消耗该预算，热路径不取时钟。
+这是按配置周期计算的预算，不承诺真实墙钟上限；业务停顿会拉长实际等待时间。
 
 #### `hal_rt_axis_fault_reset_state()`
 
@@ -964,8 +975,8 @@ int32_t hal_rt_axis_fault_reset_state(const HalContext* c, HalAxisId id, int32_t
 
 | 值 | 含义 |
 |---|---|
-| `HAL_RESET_NONE` | 从未请求过复位 |
-| `HAL_RESET_PENDING` | 已请求，边沿已发，等驱动器离开 Fault |
+| `HAL_RESET_NONE` | 无复位请求，或复位被显式停止取消；不表示成功 |
+| `HAL_RESET_PENDING` | 已请求，正在产生低/高脉冲并等待离开 Fault |
 | `HAL_RESET_DONE` | 已完成：状态字已离开 Fault。轴保持未使能 |
 | `HAL_RESET_TIMEOUT` | 超时仍未离开 Fault。轴保持未使能 |
 
@@ -1015,8 +1026,11 @@ while (running) {
 
 - **非阻塞且幂等。** DS402 状态机在后续 `begin` 里逐拍推进，**约 3~4 拍**才到位。**必须轮询 `read_status().enabled` 确认**，不可假设当拍生效。
 - **`on = 0` 停在 DS402 SwitchedOn**（可收指令、不带载），**不是断电**。要断电请用 `hal_rt_axis_estop()`。
+- 已有“撤销电压”急停覆盖时，`on = 0` 保持撤销电压，不把控制字降成 `0x07`。
+  此覆盖可由显式 `on = 1` 或后续拍受理的故障复位解除；同拍停止仍优先。
 - 请求**发生变化**时会丢弃该轴**尚未提交**的运动指令；恢复运动须重新下发目标位置。重复相同请求不会反复丢弃。
-- 使能**不会**自动清除驱动器故障。当前没有独立的公共故障复位接口。
+- 使能**不会**自动清除驱动器故障。请显式调用 `hal_rt_axis_fault_reset()`。
+- 从 `SwitchedOn` 上使能前也会预置当前位置，避免执行去使能前遗留的目标。
 
 #### 4.2.2 轴急停函数hal_rt_axis_estop()
 
@@ -1364,13 +1378,13 @@ int32_t hal_rt_spindle_write_speed(HalContext *c, HalAxisId id, double rpm, int3
 
 **函数功能**
 
-在 CSV 模式下下发转速指令。内部换算并**暂存**，到 `commit` 才下发：
+在 CSV 模式下下发转速指令。按整数 rpm 假设换算并**暂存**，到 `commit` 才下发：
 
 ```text
-速度命令计数/秒 = rpm × dir × 6 ÷ command_scale(axis)
+速度 PDO = round(rpm × dir × (command_invert ? -1 : 1))
 ```
 
-（乘除 6 来自「一转 360 度、一分钟 60 秒」。）
+位置当量不参与速度换算。`command_speed` 仍保留调用方坐标系下的 `rpm × dir`。
 
 **函数参数及返回值**
 
@@ -1399,7 +1413,8 @@ hal_rt_spindle_write_speed(ctx, spindle, 0.0, 0);
 - 受理条件同位置写入：本拍已 `begin` 且未 `commit`、该轴已使能、状态机已到位、**运行模式确为 CSV**。
 - 本拍带出的 `at_speed` **先按指令值算**，下一拍采样时才按实测刷新 —— 不要用它当作"已经到速"的证据。
 - **返回 `HAL_OK` 只代表受理并暂存。**
-- **当前转速换算假设速度 PDO 的单位是计数/秒。** 使用 CSV 前须按设备手册、显示值或外部测速确认这个假设。
+- **当前速度 PDO 假设为整数 rpm。** 使用 CSV 前须按设备手册、显示值或外部测速确认。
+  如果实际单位为 0.1 rpm 或计数/秒，当前接口尚不能配置该比例，不应直接使用。
 - `accel` 字段当前**不参与轨迹生成**，HAL 不在这里规划加减速曲线。
 
 #### 4.3.5 主轴转速读取函数hal_rt_spindle_read_speed()
@@ -1435,7 +1450,7 @@ if (hal_rt_spindle_read_speed(ctx, spindle, &rpm) == HAL_OK)
 
 - 带出的是**带符号**值，与下发时的 `dir` 口径不同（下发是 `rpm` + `dir` 两个参数）。比较时注意符号。
 - 读的是最近一次 `begin` 的快照，最多滞后一拍。
-- 反馈 rpm 的换算用到 `feedback_scale`；若命令与反馈当量配置不同，两者不会自动抵消。
+- 反馈 rpm = 原始有符号速度 PDO × (`feedback_invert ? -1 : 1`)；不使用位置当量。
 
 #### 4.3.6 主轴状态读取函数hal_rt_spindle_read_status()
 

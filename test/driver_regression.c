@@ -8,7 +8,7 @@
 #include <time.h>
 
 static uint64_t fake_ms;
-static uint32_t start_seconds, active_seconds, op_seconds, sync_seconds;
+static uint32_t start_seconds, active_seconds, op_seconds, sync_seconds, master_cycle;
 static int advance_start_ms, stop_during_wait;
 int __wrap_clock_gettime(clockid_t id, struct timespec* ts) {
     ts->tv_sec = (time_t)(fake_ms / 1000);
@@ -70,7 +70,7 @@ int GM_Master_Start(uint32_t timeout, int* interrupt) {
 int GM_Slave_Num_Get(void) { int rc = CALL(); return rc ? rc : slaves; }
 int GM_Calculate_Config_Info(Slave_info** list) { return CALL(); }
 int GM_PDO_Map_Print(Slave_info* list, uint32_t num) { return 0; }
-int GM_Master_Set_Cycle(uint32_t period) { return CALL(); }
+int GM_Master_Set_Cycle(uint32_t period) { master_cycle = period; return CALL(); }
 int GM_DC_Enable(void) { return CALL(); }
 int GM_Reg_Resource_Init(uint32_t count, uint32_t* sizes) { return CALL(); }
 int GM_Sdo_Datagram_Enable(void) { return CALL(); }
@@ -388,8 +388,9 @@ static void servo_tests(void) {
         CHECK(Master_ServoStep(0,DS402_REQ_ENABLE,8,NULL) < 0 && write_count == 2);
         CHECK(written_index[0] == 0x607A && written_index[1] == 0x6060);
         write_count = 0; write_fail_index = 0x6040; actual_mode = 8;
-        CHECK(Master_ServoStep(0,DS402_REQ_ENABLE,8,NULL) < 0 && write_count == 1);
-        CHECK(written_value[0] == 0x0F);
+        CHECK(Master_ServoStep(0,DS402_REQ_ENABLE,8,NULL) < 0 && write_count == 2);
+        CHECK(written_index[0] == 0x607A && written_value[0] == 1234);
+        CHECK(written_index[1] == 0x6040 && written_value[1] == 0x0F);
     }
     clear_failure(); status_word = 0x23; actual_mode = 8;
     g_device_data[0].slave.act_mode.bit_length = 0;
@@ -410,7 +411,34 @@ static void servo_tests(void) {
     CHECK(Master_ServoSetModeSwitch(0,(Ds402ModeSwitch)99) < 0);
     CHECK(Master_ServoStep(0,DS402_REQ_ENABLE,99,NULL) < 0);
     CHECK(servo_reads == 0 && write_count == 0);
+    const uint16_t enabled_words[] = {0x0027, 0x0037, 0x0227, 0x0237};
+    for (unsigned i = 0; i < sizeof(enabled_words) / sizeof(enabled_words[0]); ++i) {
+        clear_failure(); status_word = enabled_words[i]; actual_mode = 8;
+        CHECK(Master_ServoStep(0, DS402_REQ_ENABLE, 8, NULL) == 0 && write_count == 0);
+        CHECK(Master_ServoStep(0, DS402_REQ_DISABLE, 8, NULL) == 0 && write_count == 1);
+        CHECK(written_index[0] == 0x6040 && written_value[0] == 7);
+        clear_failure(); actual_mode = 9;
+        CHECK(Master_ServoSetModeSwitch(0, DS402_MODESW_DISABLE_FIRST) == 0);
+        CHECK(Master_ServoStep(0, DS402_REQ_ENABLE, 8, NULL) == 0 && write_count == 1);
+        CHECK(written_index[0] == 0x6040 && written_value[0] == 7);
+    }
     CHECK(ethercat_close() == 0);
+}
+
+static void dc_config_tests(void) {
+    const uint32_t periods[] = {250, 1000, 1500, 2000};
+    for (int dc = 0; dc < 2; ++dc) for (size_t i = 0; i < 4; ++i) {
+        config.cycle_us = periods[i]; config.dc_enable = dc;
+        clear_failure(); CHECK(ethercat_init(&config) == 0);
+        CHECK(master_cycle == periods[i]);
+        CHECK(slave_list->sync_assign_activate == (dc ? 0x300u : 0u));
+        CHECK(slave_list->sync0_cycle == (dc ? periods[i] * 1000u : 0u));
+        CHECK(slave_list->sync0_shift == (dc ? periods[i] * 500u : 0u));
+        CHECK(ethercat_close() == 0);
+    }
+    config.cycle_us = UINT32_MAX; const int before = sdk_calls;
+    CHECK(ethercat_init(&config) < 0 && sdk_calls == before);
+    config.cycle_us = 1000; config.dc_enable = 1;
 }
 
 static void parser_tests(void) {
@@ -562,6 +590,7 @@ static void allocation_tests(void) {
 int main(void) {
     lifecycle_tests();
     servo_tests();
+    dc_config_tests();
     parser_tests();
     io_tests();
     fallback_tests();

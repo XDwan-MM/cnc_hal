@@ -16,8 +16,8 @@
 
 /* 故障复位进展（hal_rt_axis_fault_reset_state 的出参）。
  * 用宏不用 enum：C 的 enum 底层宽度由实现定义，不适合跨 ABI（与 hal_types.h 同一条规矩）。 */
-#define HAL_RESET_NONE     0   /* 从未请求过复位 */
-#define HAL_RESET_PENDING  1   /* 已请求，边沿已发，等驱动器离开 Fault */
+#define HAL_RESET_NONE     0   /* 无复位请求，或被显式停止取消；不表示复位成功 */
+#define HAL_RESET_PENDING  1   /* 已请求，正在生成低/高脉冲并等待离开 Fault */
 #define HAL_RESET_DONE     2   /* 已完成：状态字已离开 Fault。轴保持未使能 */
 #define HAL_RESET_TIMEOUT  3   /* 超时仍未离开 Fault。轴保持未使能 */
 

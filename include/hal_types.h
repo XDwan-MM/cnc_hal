@@ -94,7 +94,7 @@ typedef struct {
     int32_t feedback_wrap;              /* HAL_WRAP_* */
     double  command_units_per_count;    /* 命令当量（用户单位/脉冲），> 0 如确定 1 mm 对应 10000 个命令计数，就传入 command_units_per_count = 0.0001*/
     double  feedback_units_per_count;   /* 反馈当量，> 0。可与命令不同 */
-    int32_t command_invert;             /* 非零 = 命令方向取反 */
+    int32_t command_invert;             /* 非零 = 位置及主轴 CSV 转速命令方向取反 */
     int32_t feedback_invert;            /* 非零 = 反馈方向取反。**与命令分开**——
                                            外接编码器/光栅尺可能只需要翻反馈 */
     double  enc_off;                    /* 已保存的坐标偏置；旧 RT 语义：原始位置 - enc_off */

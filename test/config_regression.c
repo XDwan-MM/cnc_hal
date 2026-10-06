@@ -55,6 +55,10 @@ int main(void) {
     assert(hal_config_validate(&c, NULL, 0) == HAL_ERROR_CONFIG);
     c = good(); c.cycle_timeout_ms = 0;
     assert(hal_config_validate(&c, NULL, 0) == HAL_ERROR_CONFIG);
+    c = good(); c.cycle_us = UINT32_MAX;
+    assert(hal_config_validate(&c, NULL, 0) == HAL_ERROR_CONFIG);
+    c.cycle_us = UINT32_MAX / 1000u;
+    assert(hal_config_validate(&c, NULL, 0) == HAL_OK);
     memset(err, 'x', sizeof(err)); hal_error_text(HAL_ERROR_STOPPED, err, sizeof(err));
     assert(strcmp(err, "已请求停止") == 0);
     puts("Config regression passed");
