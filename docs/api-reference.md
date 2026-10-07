@@ -1178,6 +1178,8 @@ int32_t hal_rt_axis_read_status(HalContext *c, HalAxisId id, HalCAxisStatus *out
 | `position_valid` | 坐标是否可信。**当前恒为 1** |
 | `actual_pos` | 实际位置（用户单位） |
 | `command_pos` | 最近下发的指令位置（用户单位），由写接口更新 |
+| `actual_speed` | 实际速度。**单位是驱动器速度对象（`0x606C`）的单位，HAL 不做任何换算**——常见是 rpm，也可能是 mm/s，取决于每台驱动器怎么配。`speed_valid` 为 0 时它恒为 0，此时「0」表示**不可得**，不是「静止」。与 `HalCSpindleStatus.actual_speed` 同源（同一个读数，含 `feedback_invert`） |
+| `speed_valid` | 非零 = 该轴映射了速度 PDO（`0x606C` 与 `0x60FF` 都是 32 位），`actual_speed` 才有意义。主轴上恒为 1——HAL 在 bind 阶段就拒绝没有速度 PDO 的主轴 |
 | `raw_status` | 原始 DS402 状态字 `0x6041` |
 | `error_code` | 驱动器故障码 `0x603F` |
 | `error_code_valid` | 故障码是否有效；`0x603F` 未绑定时为 0 |

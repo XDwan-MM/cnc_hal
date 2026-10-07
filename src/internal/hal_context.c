@@ -574,6 +574,10 @@ static int sample_axis(Axis* a) {
      * 需要分别确认读写比例，当前接口尚不支持配置——换机器前先核对对象字典。 */
     a->speed.actual_speed = a->has_speed ?
         signed32(velocity) * (a->cfg.feedback_invert ? -1 : 1) : 0;
+    /* 轴状态里给**同一份**读数：进给轴拿不到 spindle 那个出参（它要求主轴），而实际
+     * 速度是进给率显示要用的。两者必须同源，别让它们各算一遍漂开。 */
+    a->status.actual_speed = a->speed.actual_speed;
+    a->status.speed_valid = a->has_speed;
     if (!isfinite(a->status.actual_pos) || !isfinite(a->speed.actual_speed)) return HAL_ERROR_BUS;
     a->speed.at_speed = a->spindle && a->status.enabled && mode == DS402_MODE_CSV &&
         fabs(a->speed.actual_speed - a->speed.command_speed) <= a->spindle_cfg.speed_window;

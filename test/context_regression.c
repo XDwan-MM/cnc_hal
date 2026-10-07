@@ -304,6 +304,16 @@ static void optional_capabilities(void) {
     HalCAxisStatus status;
     CHECK(hal_rt_axis_read_status(c, 7, &status) == 0 && !status.error_code_valid);
     CHECK(hal_rt_axis_read_status(c, 3, &status) == 0 && status.error_code_valid);
+    /* 实际速度也要能从**轴状态**里读到：进给轴拿不到 hal_rt_spindle_read_speed（它要求
+     * 主轴），而进给率显示要这个数。上面 capability 已经断言过这两根轴一个有速度 PDO、
+     * 一个没有，正好用来钉住"没映射"与"速度为 0"必须能区分——
+     * 分不开的话上层会把"读不到"当成"停着"。 */
+    servo[0][DEV_DICT_ROLE_ACTUAL_SPEED] = 1234;
+    cycle(c);
+    CHECK(hal_rt_axis_read_status(c, 3, &status) == 0 &&
+          status.speed_valid && status.actual_speed == 1234);
+    CHECK(hal_rt_axis_read_status(c, 7, &status) == 0 &&
+          !status.speed_valid && status.actual_speed == 0);
     hal_context_destroy(c);
     omit_optional = 0;
 
@@ -949,6 +959,11 @@ static void review_regressions(void) {
         servo[0][DEV_DICT_ROLE_ACTUAL_SPEED] = 100;
         begin(c); double rpm;
         CHECK(hal_rt_spindle_read_speed(c, 3, &rpm) == 0 && rpm == (feedback ? -100 : 100));
+        /* 轴状态里的 actual_speed 必须与主轴那条**同源**（含 feedback_invert 的符号）。
+         * 两条路各算一遍的话，同一个读数会给出不同的数。 */
+        HalCAxisStatus sp_axis;
+        CHECK(hal_rt_axis_read_status(c, 3, &sp_axis) == 0 &&
+              sp_axis.speed_valid && sp_axis.actual_speed == rpm);
         CHECK(hal_rt_spindle_write_speed(c, 3, 100, 1) == 0);
         HalCSpindleStatus speed_status;
         CHECK(hal_rt_spindle_read_status(c, 3, &speed_status) == 0);

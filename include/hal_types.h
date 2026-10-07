@@ -20,11 +20,13 @@
 
 #include <stdint.h>
 
-/* 5.0：新增 hal_io_image_size()（函数增按本文件的策略是 MAJOR）。
+/* 5.1：HalCAxisStatus 增 actual_speed / speed_valid —— 进给轴也要能读到实际速度。
+ *      只加字段、不加函数，按本文件的策略是 MINOR。
+ * 5.0：新增 hal_io_image_size()（函数增按本文件的策略是 MAJOR）。
  * 4.0：新增故障复位与总线健康查询两个公共函数，并新增
  *      HalCConfig.fault_reset_timeout_ms 字段。 */
 #define HAL_C_ABI_MAJOR  5u
-#define HAL_C_ABI_MINOR  0u
+#define HAL_C_ABI_MINOR  1u
 
 #define HAL_C_MAX_DEV     30u   /* 轴 / IO / 面板 各自的容量上限 */
 #define HAL_C_MAX_SPINDLE 4u    /* 主轴容量上限（一台机床几根就够） */
@@ -163,6 +165,14 @@ typedef struct {
                                            「可能不可信」写，将来真值出现时不用改。 */
     double   actual_pos;                /* 用户单位 */
     double   command_pos;               /* 用户单位 */
+    double   actual_speed;              /* 实际速度。单位是驱动器速度对象（0x606C）的单位，
+                                           HAL **不做任何换算**——口径见 hal_context.c
+                                           采样处那段说明。speed_valid 为 0 时它恒为 0，
+                                           此时"0"表示**不可得**，不是"静止"。 */
+    int32_t  speed_valid;               /* 非零 = 该轴映射了速度 PDO（0x606C 与 0x60FF
+                                           都是 32 位），actual_speed 才有意义。
+                                           主轴上恒为 1——HAL 在 bind 阶段就拒绝
+                                           没有速度 PDO 的主轴。 */
     uint16_t raw_status;                /* 原始状态字 0x6041，诊断用 */
     uint16_t error_code;                /* 驱动器故障码 0x603F */
     int32_t  error_code_valid;          /* 0x603F 未映射时为 0，error_code 此时无效 */
