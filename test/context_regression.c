@@ -14,8 +14,14 @@ static uint32_t inputs[4][64], output[4][64], servo[2][DEV_DICT_ROLE_COUNT];
 static int opened, starts, closes, sends, reads, writes, steps, waits;
 static int fail_init, fail_read, fail_write, fail_step, fail_wait, fail_send, fail_calloc;
 static int wrong_type, bad_width;
+static int wide_mode_bits;    /* 非零 = 模式字按 16 位建句柄（模拟蓝海华腾那类 ESI） */
+static int narrow_pos_bits;   /* 非零 = 位置 PDO 只给 16 位（应被拒） */
 static int omit_optional, omit_spindle_speed;
 static int stuck_fault;      /* 非零 = 连复位边沿也清不掉故障，用来测超时 */
+static int force_serial_zero; /* 非零 = 桩上报 serial=0，用来测 device_id 的哈希回退 */
+static uint32_t previous_control[2];
+static unsigned reset_edges[2];
+static int ignore_first_reset_edge;
 /* 驱动层的停止标志，**独立于 HAL 那份**——真实驱动层有自己的一个（main_demo.c:17），
  * Master_RequestStop() 置它、Master_WaitCycle() 前后查它。这里照抄这个结构，
  * 才能验出"HAL 的 request_stop 有没有透传到驱动层"。 */
@@ -38,19 +44,21 @@ int ethercat_init(const MasterConfig* cfg) {
     driver_stop = 0;   /* 与真实 ethercat_init 一致：每次启动清停止标志 */
     memset(slots, 0, sizeof(slots));
     memset(servo, 0, sizeof(servo));
+    memset(previous_control, 0, sizeof(previous_control));
+    memset(reset_edges, 0, sizeof(reset_edges));
     memset(output, 0, sizeof(output));
     for (int i = 0; i < 2; ++i) {
         slots[i].type = GREE_AXIS6_TYPE;
         slots[i].slave_pos = 0; slots[i].axis_index = i;
         slots[i].vendor_id = 123; slots[i].product_code = 456;
-        slots[i].serial = 99;
+        slots[i].serial = force_serial_zero ? 0 : 99;
         strcpy(slots[i].name, "Dual axis");
         slots[i].entries.slave.statusWord.bit_length = 16;
-        slots[i].entries.slave.act_pos.bit_length = 32;
-        slots[i].entries.slave.act_mode.bit_length = 8;
+        slots[i].entries.slave.act_pos.bit_length = narrow_pos_bits ? 16 : 32;
+        slots[i].entries.slave.act_mode.bit_length = wide_mode_bits ? 16 : 8;
         slots[i].entries.slave.Control_word.bit_length = 16;
         slots[i].entries.slave.target_pos.bit_length = 32;
-        slots[i].entries.slave.Modes_of_operation.bit_length = 8;
+        slots[i].entries.slave.Modes_of_operation.bit_length = wide_mode_bits ? 16 : 8;
         slots[i].entries.slave.act_speed.bit_length = 32;
         slots[i].entries.slave.target_speed.bit_length = 32;
         slots[i].entries.slave.error_code.bit_length = 16;
@@ -85,14 +93,13 @@ int ethercat_init(const MasterConfig* cfg) {
 int ethercat_close(void) { ++closes; opened = 0; return 0; }
 const char* Master_StartupError(void) { return ""; }
 int Master_SlaveCount(void) { return opened ? 3 : 0; }
-const DEVICE_BASIC_INFO* device_identity_get(int pos) {
-    static DEVICE_BASIC_INFO ids[3] = {
-        {.ID=123, .CODE=456, .Serial=99},
-        {.ID=2252, .CODE=269418497, .Revision=1},
-        {.ID=2252, .CODE=269418498, .Revision=1}
-    };
-    return &ids[pos];
-}
+/* 从站身份表放在文件作用域：测试要把它改成「同型号第 2 台」来验证 family_index。 */
+static DEVICE_BASIC_INFO g_ids[3] = {
+    {.ID=123, .CODE=456, .Serial=99},
+    {.ID=2252, .CODE=269418497, .Revision=1},
+    {.ID=2252, .CODE=269418498, .Revision=1}
+};
+const DEVICE_BASIC_INFO* device_identity_get(int pos) { return &g_ids[pos]; }
 int DeviceTable_Get(const DeviceSlot** out) { if (out) *out = opened ? slots : NULL; return opened ? 4 : 0; }
 void Master_RequestStop(void) { driver_stop = 1; }
 int  Master_StopFlag(void) { return driver_stop != 0; }
@@ -109,15 +116,21 @@ int Master_CommitCycle(void) {
     ++sends;
     if (fail_send) return -1;
     for (int i = 0; i < 2; ++i) {
-        switch (servo[i][DEV_DICT_ROLE_CONTROL_WORD]) {
+        const uint32_t control = servo[i][DEV_DICT_ROLE_CONTROL_WORD];
+        const int rising_reset = (control & 128u) && !(previous_control[i] & 128u);
+        if (rising_reset) ++reset_edges[i];
+        if (servo[i][DEV_DICT_ROLE_STATUS_WORD] & 8u) {
+            /* 故障只能由复位上升沿解除；0/7/15 不能把故障伪装成已恢复。 */
+            if (rising_reset && !stuck_fault &&
+                (!ignore_first_reset_edge || reset_edges[i] > 1))
+                servo[i][DEV_DICT_ROLE_STATUS_WORD] = 0x40;
+        } else switch (control) {
         case 0: servo[i][DEV_DICT_ROLE_STATUS_WORD] = 0x40; break;
         case 6: servo[i][DEV_DICT_ROLE_STATUS_WORD] = 0x21; break;
         case 7: servo[i][DEV_DICT_ROLE_STATUS_WORD] = 0x23; break;
         case 15: servo[i][DEV_DICT_ROLE_STATUS_WORD] = 0x237; break;
-        /* 0x80 = 故障复位边沿。真实驱动器收到边沿且故障确实消失后，会回到
-         * SwitchOnDisabled。stuck_fault 用来模拟"边沿发了但故障还在"。 */
-        case 128: if (!stuck_fault) servo[i][DEV_DICT_ROLE_STATUS_WORD] = 0x40; break;
         }
+        previous_control[i] = control;
         servo[i][DEV_DICT_ROLE_MODE_DISPLAY] = servo[i][DEV_DICT_ROLE_OP_MODE];
     }
     return 0;
@@ -184,7 +197,10 @@ static HalCConfig config(void) {
     c.spindles[0].axis.command_units_per_count = .5;
     c.spindles[0].axis.feedback_units_per_count = .25;
     c.spindles[0].axis.feedback_wrap = HAL_WRAP_MODULAR;
-    c.spindles[0].max_speed = 1000; c.spindles[0].speed_window = .5;
+    c.spindles[0].max_speed = 1000;
+    /* 定向：值与位都是厂商专有的，这里用台架那套（0x040F + 状态字 bit10）当样例。 */
+    c.spindles[0].axis.vendor_orient_control_word = 0x040Fu;
+    c.spindles[0].axis.vendor_orient_done_mask = 0x0400u;
     c.io_count = c.panel_count = 1;
     c.ios[0].slave_pos = 1; c.ios[0].x_start = 2; c.ios[0].y_start = 1;
     c.panels[0].slave_pos = 2; c.panels[0].x_start = 10; c.panels[0].y_start = 6;
@@ -293,13 +309,25 @@ static void optional_capabilities(void) {
     HalCAxisStatus status;
     CHECK(hal_rt_axis_read_status(c, 7, &status) == 0 && !status.error_code_valid);
     CHECK(hal_rt_axis_read_status(c, 3, &status) == 0 && status.error_code_valid);
+    /* 实际速度也要能从**轴状态**里读到：进给轴拿不到 hal_rt_spindle_read_speed（它要求
+     * 主轴），而进给率显示要这个数。上面 capability 已经断言过这两根轴一个有速度 PDO、
+     * 一个没有，正好用来钉住"没映射"与"速度为 0"必须能区分——
+     * 分不开的话上层会把"读不到"当成"停着"。 */
+    servo[0][DEV_DICT_ROLE_ACTUAL_SPEED] = 1234;
+    cycle(c);
+    CHECK(hal_rt_axis_read_status(c, 3, &status) == 0 &&
+          status.speed_valid && status.actual_speed == 1234);
+    CHECK(hal_rt_axis_read_status(c, 7, &status) == 0 &&
+          !status.speed_valid && status.actual_speed == 0);
     hal_context_destroy(c);
     omit_optional = 0;
 
     omit_spindle_speed = 1;
     c = create(&cfg);
     char error[160];
-    CHECK(hal_context_start(c, error, sizeof(error)) == HAL_ERROR_CONFIG);
+    /* 缺必需 PDO 报 UNSUPPORTED：bind_axis 有意把它和"找不到匹配的轴"(CONFIG) 分开，
+     * start 必须原样报出来，不能一律折成 CONFIG。 */
+    CHECK(hal_context_start(c, error, sizeof(error)) == HAL_ERROR_UNSUPPORTED);
     CHECK(strstr(error, "从站 0 轴 0") && strstr(error, "主轴速度"));
     hal_context_destroy(c);
     omit_spindle_speed = 0;
@@ -342,15 +370,14 @@ static void motion_io(void) {
      * 反馈当量 .25，旧式 -1234*.25/6 会得到 -51。 */
     servo[0][DEV_DICT_ROLE_ACTUAL_SPEED] = (uint32_t)-1234;
     begin(c);
-    CHECK(hal_rt_spindle_read_status(c, 3, &s) == 0 && s.actual_speed == -1234 && !s.at_speed);
-    /* 贴近指令时 at_speed 置位：指令 -10 rpm，转速窗口 .5。
-     * 上一拍已 begin 未 commit，必须先提交才能进下一次 wait。 */
+    CHECK(hal_rt_spindle_read_status(c, 3, &s) == 0 && s.actual_speed == -1234);
+    /* 上一拍已 begin 未 commit，必须先提交才能进下一次 wait。 */
     CHECK(hal_rt_commit_cycle(c) == 0);
     servo[0][DEV_DICT_ROLE_ACTUAL_SPEED] = (uint32_t)-10;
     begin(c);
-    CHECK(hal_rt_spindle_read_status(c, 3, &s) == 0 && s.actual_speed == -10 && s.at_speed);
+    CHECK(hal_rt_spindle_read_status(c, 3, &s) == 0 && s.actual_speed == -10);
     CHECK(hal_rt_spindle_request_mode(c, 3, HAL_SPINDLE_CSP) == 0);
-    CHECK(hal_rt_spindle_write_speed(c, 3, 10, 1) == HAL_ERROR_NOT_RUNNING);
+    CHECK(hal_rt_spindle_write_speed(c, 3, 10, 1) == HAL_ERROR_NOT_ENABLED);
     CHECK(hal_rt_spindle_estop(c, 3) == 0);
     CHECK(hal_rt_axis_write_pos(c, 7, 130) == 0);
     CHECK(hal_rt_axis_estop(c, 7) == 0);
@@ -739,12 +766,13 @@ static void fault_reset_and_bus_health(void) {
     /* 只允许在 begin 与 commit 之间受理（request 只有周期线程能写） */
     CHECK(hal_rt_axis_fault_reset(c, 7) == 0);
     CHECK(hal_rt_axis_fault_reset_state(c, 7, &st) == 0 && st == HAL_RESET_PENDING);
-    /* 复位期间不能写位置：request 不是 ENABLE，motion_ready 为假 */
-    CHECK(hal_rt_axis_write_pos(c, 7, 10) == HAL_ERROR_NOT_RUNNING);
+    /* 复位期间不能写位置：request 不是 ENABLE，轴也未使能（2026-10-08 起分码为 NOT_ENABLED） */
+    CHECK(hal_rt_axis_write_pos(c, 7, 10) == HAL_ERROR_NOT_ENABLED);
     CHECK(hal_rt_commit_cycle(c) == 0);
 
     /* 下一拍 begin 才发出 0x80 边沿，该拍 commit 里 mock 让驱动器离开 Fault */
-    cycle(c);
+    cycle(c); /* 先发送低电平 */
+    cycle(c); /* 再发送复位上升沿 */
     /* 再下一拍 begin 采样到已离开 Fault → DONE，且请求被改成 DISABLE */
     begin(c);
     CHECK(hal_rt_axis_fault_reset_state(c, 7, &st) == 0 && st == HAL_RESET_DONE);
@@ -804,10 +832,452 @@ static void io_image_size(void) {
     hal_context_destroy(c);
 }
 
+/* 2026-10-04 审查：隔离停止、重使能、复位边沿/超时/急停组合和速度方向。 */
+static void review_regressions(void) {
+    HalCConfig cfg = config();
+    HalContext* c = create(&cfg);
+    HalContext* idle = create(&cfg);
+    CHECK(hal_context_start(c, NULL, 0) == 0);
+    CHECK(hal_context_request_stop(idle) == 0 && !driver_stop);
+    cycle(c);
+    hal_context_destroy(idle);
+    hal_context_destroy(c);
+
+    cfg.axes[0].feedback_units_per_count = cfg.axes[0].command_units_per_count;
+    c = create(&cfg); CHECK(hal_context_start(c, NULL, 0) == 0);
+    servo[1][DEV_DICT_ROLE_STATUS_WORD] = 0x23;
+    servo[1][DEV_DICT_ROLE_CONTROL_WORD] = 7;
+    servo[1][DEV_DICT_ROLE_TARGET_POS] = 9000;
+    begin(c); CHECK(hal_rt_axis_enable(c, 7, 1) == 0);
+    CHECK(hal_rt_commit_cycle(c) == 0);
+    begin(c);
+    CHECK(servo[1][DEV_DICT_ROLE_TARGET_POS] == 100);
+    CHECK(servo[1][DEV_DICT_ROLE_CONTROL_WORD] == 15);
+    CHECK(hal_rt_commit_cycle(c) == 0);
+    begin(c); CHECK(hal_rt_axis_write_pos(c, 7, 900) == 0);
+    CHECK(hal_rt_commit_cycle(c) == 0);
+    begin(c); CHECK(hal_rt_axis_enable(c, 7, 0) == 0);
+    CHECK(hal_rt_commit_cycle(c) == 0);
+    begin(c); CHECK(hal_rt_axis_enable(c, 7, 1) == 0);
+    CHECK(hal_rt_commit_cycle(c) == 0);
+    begin(c);
+    CHECK(servo[1][DEV_DICT_ROLE_TARGET_POS] == 100);
+    CHECK(hal_rt_commit_cycle(c) == 0);
+    hal_context_destroy(c);
+
+    for (int action = 0; action < 3; ++action) {
+        cfg = config(); cfg.fault_reset_timeout_ms = 5;
+        if (action == 2) cfg.axes[0].estop_action = HAL_ESTOP_DISABLE_VOLTAGE;
+        c = create(&cfg); CHECK(hal_context_start(c, NULL, 0) == 0);
+        begin(c);
+        if (!action) CHECK(hal_rt_axis_enable(c, 7, 0) == 0);
+        else CHECK(hal_rt_axis_estop(c, 7) == 0);
+        CHECK(hal_rt_axis_fault_reset(c, 7) == HAL_ERROR_STATE); /* 同拍停止优先 */
+        CHECK(hal_rt_commit_cycle(c) == 0);
+        for (int attempt = 0; attempt < 2; ++attempt) {
+            servo[1][DEV_DICT_ROLE_STATUS_WORD] = 8;
+            begin(c); CHECK(hal_rt_axis_fault_reset(c, 7) == 0);
+            CHECK(hal_rt_commit_cycle(c) == 0);
+            int32_t state = HAL_RESET_PENDING;
+            for (int n = 0; n < 10 && state == HAL_RESET_PENDING; ++n) {
+                cycle(c); CHECK(hal_rt_axis_fault_reset_state(c, 7, &state) == 0);
+            }
+            CHECK(state == HAL_RESET_DONE);
+            CHECK(reset_edges[1] == (unsigned)attempt + 1);
+            CHECK(!(servo[1][DEV_DICT_ROLE_CONTROL_WORD] & 128u));
+            HalCAxisStatus status;
+            CHECK(hal_rt_axis_read_status(c, 7, &status) == 0 && !status.enabled);
+        }
+        hal_context_destroy(c);
+    }
+
+    cfg = config(); cfg.fault_reset_timeout_ms = 1;
+    c = create(&cfg); CHECK(hal_context_start(c, NULL, 0) == 0);
+    stuck_fault = 1; servo[1][DEV_DICT_ROLE_STATUS_WORD] = 8;
+    begin(c); CHECK(hal_rt_axis_fault_reset(c, 7) == 0);
+    CHECK(hal_rt_commit_cycle(c) == 0);
+    cycle(c); CHECK(reset_edges[1] == 0);
+    cycle(c); CHECK(reset_edges[1] == 1);
+    cycle(c);
+    int32_t state;
+    CHECK(hal_rt_axis_fault_reset_state(c, 7, &state) == 0 && state == HAL_RESET_TIMEOUT);
+    CHECK(!(servo[1][DEV_DICT_ROLE_CONTROL_WORD] & 128u));
+    stuck_fault = 0; hal_context_destroy(c);
+
+    cfg = config(); cfg.cycle_us = 1500; cfg.fault_reset_timeout_ms = 2;
+    c = create(&cfg); CHECK(hal_context_start(c, NULL, 0) == 0);
+    stuck_fault = 1; servo[1][DEV_DICT_ROLE_STATUS_WORD] = 8;
+    begin(c); CHECK(hal_rt_axis_fault_reset(c, 7) == 0);
+    CHECK(hal_rt_commit_cycle(c) == 0);
+    cycle(c); cycle(c); cycle(c);
+    CHECK(hal_rt_axis_fault_reset_state(c, 7, &state) == 0 && state == HAL_RESET_PENDING);
+    cycle(c);
+    CHECK(hal_rt_axis_fault_reset_state(c, 7, &state) == 0 && state == HAL_RESET_TIMEOUT);
+    stuck_fault = 0; hal_context_destroy(c);
+
+    cfg = config(); cfg.fault_reset_timeout_ms = 10;
+    c = create(&cfg); CHECK(hal_context_start(c, NULL, 0) == 0);
+    ignore_first_reset_edge = 1; servo[1][DEV_DICT_ROLE_STATUS_WORD] = 8;
+    begin(c); CHECK(hal_rt_axis_fault_reset(c, 7) == 0);
+    CHECK(hal_rt_commit_cycle(c) == 0);
+    for (int n = 0; n < 6; ++n) cycle(c);
+    CHECK(reset_edges[1] == 2);
+    CHECK(hal_rt_axis_fault_reset_state(c, 7, &state) == 0 && state == HAL_RESET_DONE);
+    ignore_first_reset_edge = 0;
+    begin(c); CHECK(hal_context_request_stop(c) == 0);
+    CHECK(hal_rt_axis_fault_reset(c, 7) == HAL_ERROR_STOPPED);
+    hal_context_destroy(c);
+
+    c = create(&cfg); CHECK(hal_context_start(c, NULL, 0) == 0);
+    begin(c); fail_send = 1;
+    CHECK(hal_rt_commit_cycle(c) == HAL_ERROR_BUS); fail_send = 0;
+    CHECK(hal_rt_axis_fault_reset(c, 7) == HAL_ERROR_BUS);
+    hal_context_destroy(c);
+
+    for (int stop = 0; stop < 3; ++stop) {
+        cfg = config();
+        if (stop == 2) cfg.axes[0].estop_action = HAL_ESTOP_DISABLE_VOLTAGE;
+        c = create(&cfg); CHECK(hal_context_start(c, NULL, 0) == 0);
+        stuck_fault = 1; servo[1][DEV_DICT_ROLE_STATUS_WORD] = 8;
+        begin(c); CHECK(hal_rt_axis_fault_reset(c, 7) == 0);
+        CHECK(hal_rt_axis_enable(c, 7, 1) == HAL_ERROR_NOT_RUNNING);
+        CHECK(hal_rt_commit_cycle(c) == 0);
+        cycle(c); begin(c); /* 本拍已暂存高电平，停止必须在 commit 覆盖它 */
+        CHECK(servo[1][DEV_DICT_ROLE_CONTROL_WORD] == 128);
+        if (!stop) CHECK(hal_rt_axis_enable(c, 7, 0) == 0);
+        else CHECK(hal_rt_axis_estop(c, 7) == 0);
+        CHECK(hal_rt_axis_fault_reset_state(c, 7, &state) == 0 && state == HAL_RESET_NONE);
+        CHECK(hal_rt_axis_fault_reset(c, 7) == HAL_ERROR_STATE);
+        CHECK(hal_rt_commit_cycle(c) == 0);
+        const uint32_t stop_word = stop == 2 ? 0 : 7;
+        CHECK(servo[1][DEV_DICT_ROLE_CONTROL_WORD] == stop_word && reset_edges[1] == 0);
+        cycle(c); CHECK(servo[1][DEV_DICT_ROLE_CONTROL_WORD] == stop_word);
+        stuck_fault = 0; hal_context_destroy(c);
+    }
+
+    /* 固定原始反馈 +100 是合成输入，只检查命令/反馈的符号换算。
+     * 模拟器不随命令生成真实速度；四组合包含命令与反馈方向不一致的输入。
+     * 这组符号关系不能证明任意方向组合在实机上有效；实际极性须按接线核对。 */
+    for (int command = 0; command < 2; ++command) for (int feedback = 0; feedback < 2; ++feedback) {
+        cfg = config(); cfg.spindles[0].axis.command_invert = command;
+        cfg.spindles[0].axis.feedback_invert = feedback;
+        c = create(&cfg); CHECK(hal_context_start(c, NULL, 0) == 0); enable(c);
+        servo[0][DEV_DICT_ROLE_ACTUAL_SPEED] = 100;
+        begin(c); double rpm;
+        CHECK(hal_rt_spindle_read_speed(c, 3, &rpm) == 0 && rpm == (feedback ? -100 : 100));
+        /* 轴状态里的 actual_speed 必须与主轴那条**同源**（含 feedback_invert 的符号）。
+         * 两条路各算一遍的话，同一个读数会给出不同的数。 */
+        HalCAxisStatus sp_axis;
+        CHECK(hal_rt_axis_read_status(c, 3, &sp_axis) == 0 &&
+              sp_axis.speed_valid && sp_axis.actual_speed == rpm);
+        CHECK(hal_rt_spindle_write_speed(c, 3, 100, 1) == 0);
+        HalCSpindleStatus speed_status;
+        CHECK(hal_rt_spindle_read_status(c, 3, &speed_status) == 0);
+        CHECK(speed_status.command_speed == 100);
+        CHECK(hal_rt_commit_cycle(c) == 0);
+        CHECK(servo[0][DEV_DICT_ROLE_TARGET_SPEED] == (command ? (uint32_t)-100 : 100));
+        begin(c); CHECK(hal_rt_spindle_write_speed(c, 3, 100, -1) == 0);
+        CHECK(hal_rt_spindle_read_status(c, 3, &speed_status) == 0);
+        CHECK(speed_status.command_speed == -100);
+        CHECK(hal_rt_commit_cycle(c) == 0);
+        CHECK(servo[0][DEV_DICT_ROLE_TARGET_SPEED] == (command ? 100 : (uint32_t)-100));
+        hal_context_destroy(c);
+    }
+}
+
+static void voltage_stop_priority(void) {
+    for (int order = 0; order < 2; ++order) {
+        HalCConfig cfg = config(); cfg.axes[0].estop_action = HAL_ESTOP_DISABLE_VOLTAGE;
+        HalContext* c = create(&cfg);
+        CHECK(hal_context_start(c, NULL, 0) == 0); enable(c);
+        begin(c);
+        if (order) CHECK(hal_rt_axis_enable(c, 7, 0) == 0);
+        CHECK(hal_rt_axis_estop(c, 7) == 0);
+        if (!order) CHECK(hal_rt_axis_enable(c, 7, 0) == 0);
+        CHECK(hal_rt_commit_cycle(c) == 0);
+        CHECK(servo[1][DEV_DICT_ROLE_CONTROL_WORD] == 0);
+        for (int n = 0; n < 3; ++n) {
+            begin(c); CHECK(hal_rt_axis_enable(c, 7, 0) == 0);
+            CHECK(hal_rt_commit_cycle(c) == 0);
+            CHECK(servo[1][DEV_DICT_ROLE_CONTROL_WORD] == 0);
+            CHECK(servo[1][DEV_DICT_ROLE_STATUS_WORD] == 0x40);
+        }
+        /* 显式重新上使能仍可解除历史停止；去使能不能代替这个显式动作。 */
+        CHECK(hal_rt_axis_enable(c, 7, 1) == 0);
+        for (int n = 0; n < 4; ++n) cycle(c);
+        HalCAxisStatus status;
+        CHECK(hal_rt_axis_read_status(c, 7, &status) == 0 && status.enabled);
+        hal_context_destroy(c);
+    }
+}
+
+static void standard_enabled_status(void) {
+    const uint16_t words[] = {0x0027, 0x0037, 0x0227, 0x0237};
+    for (unsigned i = 0; i < sizeof(words) / sizeof(words[0]); ++i) {
+        HalCConfig cfg = config(); HalContext* c = create(&cfg);
+        CHECK(hal_context_start(c, NULL, 0) == 0); enable(c);
+        servo[0][DEV_DICT_ROLE_STATUS_WORD] = servo[1][DEV_DICT_ROLE_STATUS_WORD] = words[i];
+        begin(c);
+        HalCAxisStatus status; HalCSpindleStatus spindle;
+        CHECK(hal_rt_axis_read_status(c, 7, &status) == 0 && status.enabled);
+        CHECK(hal_rt_spindle_read_status(c, 3, &spindle) == 0 && spindle.enabled);
+        CHECK(hal_rt_axis_write_pos(c, 7, 25) == 0);
+        CHECK(hal_rt_spindle_write_speed(c, 3, 100, 1) == 0);
+        CHECK(hal_rt_commit_cycle(c) == 0);
+        servo[0][DEV_DICT_ROLE_STATUS_WORD] = servo[1][DEV_DICT_ROLE_STATUS_WORD] = 0x0007;
+        begin(c);
+        CHECK(hal_rt_axis_read_status(c, 7, &status) == 0 && !status.enabled);
+        CHECK(hal_rt_axis_write_pos(c, 7, 25) == HAL_ERROR_NOT_ENABLED);
+        CHECK(hal_rt_spindle_write_speed(c, 3, 100, 1) == HAL_ERROR_NOT_ENABLED);
+        CHECK(hal_rt_commit_cycle(c) == 0);
+        hal_context_destroy(c);
+    }
+}
+
+/* 2026-10-04 覆盖补强：下面四处原先被改坏也不会让任何用例变红。 */
+static void coverage_gaps(void) {
+    HalCConfig cfg;
+    HalContext* c;
+
+    /* 1) 启动超时码：MASTER_START_TIMEOUT 必须翻成 HAL_ERROR_TIMEOUT，
+     *    不是笼统的 HAL_ERROR_BUS ——上层的报警号是按码分的。 */
+    cfg = config(); c = create(&cfg);
+    fail_init = MASTER_START_TIMEOUT;
+    CHECK(hal_context_start(c, NULL, 0) == HAL_ERROR_TIMEOUT);
+    fail_init = 0;
+    CHECK(hal_context_start(c, NULL, 0) == 0);
+    hal_context_destroy(c);
+
+    /* 2) family_index：把第 2 台从站改成与第 1 台同 vendor+product，
+     *    「同型号第几台」必须从 0 变成 1。 */
+    g_ids[1].ID = g_ids[0].ID; g_ids[1].CODE = g_ids[0].CODE;
+    cfg = config(); c = create(&cfg);
+    CHECK(hal_context_start(c, NULL, 0) == 0);
+    HalCSlaveInfo slave;
+    CHECK(hal_slave_info(c, 0, &slave) == 0 && slave.identity.family_index == 0);
+    CHECK(hal_slave_info(c, 1, &slave) == 0 && slave.identity.family_index == 1);
+    CHECK(hal_slave_info(c, 2, &slave) == 0 && slave.identity.family_index == 0);
+    hal_context_destroy(c);
+    g_ids[1].ID = 2252; g_ids[1].CODE = 269418497;
+
+    /* 3) device_id 的哈希回退：serial==0 时必须是 FNV(vendor,product,revision)。
+     *    这里断言**确切数值**——只断言「非零」或「两个设备不同」都挡不住常量被改。 */
+    force_serial_zero = 1;
+    cfg = config(); c = create(&cfg);
+    CHECK(hal_context_start(c, NULL, 0) == 0);
+    HalCIdentity ident;
+    CHECK(hal_device_identity(c, 7, &ident) == 0 && ident.serial == 0);
+    CHECK(ident.device_id == UINT64_C(18014831272581144209));
+    hal_context_destroy(c);
+    force_serial_zero = 0;
+
+    /* 4) 位置写入的 CSP 闸门：主轴处于 CSV 使能态时，通用位置写入必须被拒，
+     *    否则 0x607A 会被下发给速度模式驱动器。
+     *    2026-10-08：模式不符与未使能已拆成两个错误码，这里断言的是模式那一个。 */
+    cfg = config(); c = create(&cfg);
+    CHECK(hal_context_start(c, NULL, 0) == 0);
+    CHECK(hal_rt_spindle_enable(c, 3, 1) == 0);
+    for (int i = 0; i < 5; ++i) cycle(c);
+    begin(c);
+    HalCSpindleStatus ss;
+    CHECK(hal_rt_spindle_read_status(c, 3, &ss) == 0 && ss.enabled && ss.mode == HAL_SPINDLE_CSV);
+    CHECK(hal_rt_axis_write_pos(c, 3, 0.0) == HAL_ERROR_MODE_MISMATCH);
+    CHECK(hal_rt_commit_cycle(c) == 0);
+    hal_context_destroy(c);
+}
+
+/* 主轴定向：厂商控制字 + 状态字完成位。 */
+static void spindle_orient(void) {
+    HalCConfig cfg = config(); HalContext* c = create(&cfg);
+    CHECK(hal_context_start(c, NULL, 0) == 0);
+    CHECK(hal_rt_spindle_enable(c, 3, 1) == 0);
+    for (int i = 0; i < 5; ++i) cycle(c);
+
+    /* 还没请求时是 NONE；定向期间主轴的伺服在索引 0。 */
+    int32_t os = -1;
+    begin(c);
+    CHECK(hal_rt_spindle_orient_state(c, 3, &os) == 0 && os == HAL_ORIENT_NONE);
+    CHECK(hal_rt_spindle_request_orient(c, 3) == 0);
+    CHECK(hal_rt_spindle_orient_state(c, 3, &os) == 0 && os == HAL_ORIENT_RUNNING);
+    /* 控制字要到 commit 才下发（HAL 的周期契约：write 只暂存）。 */
+    CHECK(hal_rt_commit_cycle(c) == 0);
+    CHECK(servo[0][DEV_DICT_ROLE_CONTROL_WORD] == 0x040Fu);
+    CHECK(servo[0][DEV_DICT_ROLE_TARGET_SPEED] == 0u);
+
+    /* 驱动器报完成位 → DONE，且**继续发控制字**保持对准。 */
+    servo[0][DEV_DICT_ROLE_STATUS_WORD] = 0x0437u;
+    begin(c);
+    CHECK(hal_rt_spindle_orient_state(c, 3, &os) == 0 && os == HAL_ORIENT_DONE);
+    CHECK(hal_rt_commit_cycle(c) == 0);
+    CHECK(servo[0][DEV_DICT_ROLE_CONTROL_WORD] == 0x040Fu);
+
+    /* 释放：状态回 NONE，控制字不再被定向机制接管。
+     * 断言"回到 DS402 标准值"而不是某个具体值——后者要跟着桩的状态机细节走，
+     * 太脆。这里要证的只是"厂商控制字已经被撤销"。 */
+    servo[0][DEV_DICT_ROLE_STATUS_WORD] = 0x0023u;
+    cycle(c);
+    begin(c);
+    CHECK(hal_rt_spindle_release_orient(c, 3) == 0);
+    CHECK(hal_rt_spindle_orient_state(c, 3, &os) == 0 && os == HAL_ORIENT_NONE);
+    CHECK(hal_rt_commit_cycle(c) == 0);
+    {
+        const uint32_t cw = servo[0][DEV_DICT_ROLE_CONTROL_WORD];
+        CHECK(cw == 0u || cw == 6u || cw == 7u || cw == 15u);
+    }
+    hal_context_destroy(c);
+
+    /* 没配定向控制字的轴必须明确拒绝，不能静默当成成功。 */
+    cfg = config();
+    cfg.spindles[0].axis.vendor_orient_control_word = 0;
+    cfg.spindles[0].axis.vendor_orient_done_mask = 0;
+    c = create(&cfg);
+    CHECK(hal_context_start(c, NULL, 0) == 0);
+    CHECK(hal_rt_spindle_enable(c, 3, 1) == 0);
+    for (int i = 0; i < 5; ++i) cycle(c);
+    begin(c);
+    CHECK(hal_rt_spindle_request_orient(c, 3) == HAL_ERROR_UNSUPPORTED);
+    CHECK(hal_rt_commit_cycle(c) == 0);
+    hal_context_destroy(c);
+
+    /* 进给轴不是主轴：同样的调用必须被拒。 */
+    cfg = config(); c = create(&cfg);
+    CHECK(hal_context_start(c, NULL, 0) == 0);
+    begin(c);
+    CHECK(hal_rt_spindle_request_orient(c, 7) == HAL_ERROR_ARGUMENT);
+    CHECK(hal_rt_commit_cycle(c) == 0);
+    hal_context_destroy(c);
+}
+
+/* hal_rt_axis_readiness：**只读**说明"还差什么才能受理运动指令"。
+ * 这个接口此前是公共 API 却一条用例都没有 —— 补上，顺便把它的口径钉住。 */
+static void axis_readiness(void) {
+    uint32_t r = 0xFFFFFFFFu;
+    HalCConfig cfg = config();
+    HalContext* c = create(&cfg);
+    CHECK(hal_context_start(c, NULL, 0) == 0);
+
+    /* 没跑过 begin：不在 begin 与 commit 之间 */
+    CHECK(hal_rt_axis_readiness(c, 7, &r) == 0 && (r & HAL_READY_PHASE));
+
+    begin(c);
+    /* 窗口内、但还没使能 */
+    CHECK(hal_rt_axis_readiness(c, 7, &r) == 0);
+    CHECK((r & HAL_READY_PHASE) == 0);
+    CHECK(r & HAL_READY_NOT_ENABLED);
+    CHECK(hal_rt_commit_cycle(c) == 0);
+
+    /* 使能并等状态机爬到 OperationEnabled。进给轴配置就是位置模式，
+     * 模式两位也该清掉，最终全 0 = 可受理。 */
+    CHECK(hal_rt_axis_enable(c, 7, 1) == 0);
+    for (int i = 0; i < 20; ++i) {
+        cycle(c);
+        begin(c);
+        CHECK(hal_rt_axis_readiness(c, 7, &r) == 0);
+        CHECK(hal_rt_commit_cycle(c) == 0);
+        if (r == 0) break;
+    }
+    CHECK(r == 0);
+
+    /* 主轴：配置的是速度模式。请求切到位置模式后，在驱动器 0x6061 跟上来之前
+     * MODE_ACTUAL 置位（"切换还没生效"）；跟上之后全 0 —— 这时 write_pos 才受理。
+     * 这就是"先 request_mode、等全 0、再下发"那条用法。 */
+    begin(c);   /* 必须在窗口里：上面循环最后一次已经 commit 了 */
+    CHECK(hal_rt_spindle_request_mode(c, 3, HAL_SPINDLE_CSP) == 0);
+    CHECK(hal_rt_spindle_enable(c, 3, 1) == 0);
+    CHECK(hal_rt_axis_readiness(c, 3, &r) == 0);
+    CHECK(r & HAL_READY_MODE_ACTUAL);
+    CHECK(hal_rt_commit_cycle(c) == 0);
+
+    for (int i = 0; i < 20; ++i) {
+        cycle(c);
+        begin(c);
+        CHECK(hal_rt_axis_readiness(c, 3, &r) == 0);
+        CHECK(hal_rt_commit_cycle(c) == 0);
+        if (r == 0) break;
+    }
+    CHECK(r == 0);
+
+    /* 轴不存在 / 出参为空 */
+    CHECK(hal_rt_axis_readiness(c, 99, &r) == HAL_ERROR_ARGUMENT);
+    CHECK(hal_rt_axis_readiness(c, 7, NULL) == HAL_ERROR_ARGUMENT);
+    hal_context_destroy(c);
+}
+
+/* PDO 位长判据：位置类必须正好 32 位，其余不窄于语义宽度就收。
+ * 依据是"驱动层读回来右对齐"——位长宽了数值不变，窄了才丢位。 */
+static void pdo_width_policy(void) {
+    HalCConfig cfg = config();
+    char error[160];
+
+    /* 模式字 16 位应当被接受：右对齐读回来照样是 8/9，写进去也一样。
+     * 真机例子：蓝海华腾的 0x6060/0x6061 在 ESI 里就是 16 位。 */
+    wide_mode_bits = 1;
+    HalContext* c = create(&cfg);
+    CHECK(hal_context_start(c, error, sizeof(error)) == 0);
+    hal_context_destroy(c);
+    wide_mode_bits = 0;
+
+    /* 位置 PDO 只有 16 位必须拒：signed32() 会把 0xFFFF 当成 +65535 而不是 -1，
+     * 负位置读成正的，位置环直接飞车。 */
+    narrow_pos_bits = 1;
+    c = create(&cfg);
+    CHECK(hal_context_start(c, error, sizeof(error)) == HAL_ERROR_UNSUPPORTED);
+    hal_context_destroy(c);
+    narrow_pos_bits = 0;
+}
+
+/* 释放定向**不得**替上层决定使能意图。
+ *
+ * 场景：定向完成后上层明确要求去使能，紧接着释放定向。
+ * 如果 release_orient 把 request 硬掰回 ENABLE，上层刚下的去使能就被静默吃掉——
+ * 释放只该"把控制字交回状态机"，要不要上力矩是上层的事。
+ *
+ * 断言方式：释放后再跑两拍，看状态机把控制字推到哪。
+ *   尊重意图 → 停在未使能族（0x00/0x06/0x07）
+ *   吃掉意图 → 爬到 0x0F（Enable operation）
+ */
+static void orient_release_keeps_enable_intent(void) {
+    HalCConfig cfg = config(); HalContext* c = create(&cfg);
+    CHECK(hal_context_start(c, NULL, 0) == 0);
+    CHECK(hal_rt_axis_enable(c, 3, 1) == 0);
+    for (int i = 0; i < 5; ++i) cycle(c);
+
+    begin(c);
+    CHECK(hal_rt_spindle_request_orient(c, 3) == 0);
+    CHECK(hal_rt_commit_cycle(c) == 0);
+    servo[0][DEV_DICT_ROLE_STATUS_WORD] = 0x0437u;
+    cycle(c);
+
+    int32_t os = -1;
+    begin(c);
+    CHECK(hal_rt_spindle_orient_state(c, 3, &os) == 0 && os == HAL_ORIENT_DONE);
+
+    /* 上层改主意：去使能，然后释放定向。 */
+    servo[0][DEV_DICT_ROLE_STATUS_WORD] = 0x0023u;
+    CHECK(hal_rt_axis_enable(c, 3, 0) == 0);
+    CHECK(hal_rt_spindle_release_orient(c, 3) == 0);
+    CHECK(hal_rt_commit_cycle(c) == 0);
+
+    cycle(c); cycle(c);
+    {
+        const uint32_t cw = servo[0][DEV_DICT_ROLE_CONTROL_WORD];
+        if (!(cw == 0u || cw == 6u || cw == 7u)) {
+            fprintf(stderr, "line %d: 释放定向把去使能意图吃掉了，控制字=0x%02X\n",
+                    __LINE__, cw);
+            abort();
+        }
+        ++checks;
+    }
+    hal_context_destroy(c);
+}
+
 int main(void) {
     lifecycle(); binding(); optional_capabilities(); motion_io(); wrap_and_faults();
     stop_overrides_staged_enable(); concurrent_stop();
     preset_overflow_probe(); spindle_origin_angle(); angle_regressions();
-    fault_reset_and_bus_health(); io_image_size();
+    pdo_width_policy();
+    fault_reset_and_bus_health(); io_image_size(); review_regressions();
+    voltage_stop_priority(); standard_enabled_status(); coverage_gaps();
+    spindle_orient(); orient_release_keeps_enable_intent(); axis_readiness();
     printf("context_regression: %u checks passed\n", checks);
 }

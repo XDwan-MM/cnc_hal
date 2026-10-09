@@ -581,10 +581,10 @@ int DevDict_Load(const char* path, char* err, int errLen) {
                 snprintf(msg, sizeof(msg), "devices[%d]: 应为对象", idx);
                 return loadFail(err, errLen, msg, root, text);
             }
-            static const char* const keys[] = {
+            static const char* const entry_keys[] = {
                 "vendor_id", "product_code", "revision", "type", "name", "profile", "objects"
             };
-            if (!known_keys(e, keys, sizeof(keys)/sizeof(keys[0])))
+            if (!known_keys(e, entry_keys, sizeof(entry_keys)/sizeof(entry_keys[0])))
                 return loadFail(err, errLen, "设备条目含未知字段", root, text);
             memset(dst, 0, sizeof(*dst));
 

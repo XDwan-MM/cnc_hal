@@ -32,6 +32,9 @@ typedef struct {
 #define MASTER_DEVICE_DICTIONARY_ERROR (-28675)
 const char* Master_StartupError(void);
 int Master_SlaveCount(void);
+/* 打断标志的取址与查询：device.c 的 EEPROM / PDO 映射读取要用，才能被停下来。 */
+int* Master_InterruptFlag(void);
+int  Master_Interrupted(void);
 
 /* 设备字典路径：优先使用 CNC_HAL_DEVICES_JSON 环境变量；未设置时使用
  * 构建时指定的安装路径。直接编译源码而未指定默认路径时必须设置环境变量。
@@ -43,7 +46,6 @@ int Master_SlaveCount(void);
 /* =============== 开发期开关，上机前保持默认 =============== */
 
 #define PARAM_CHANG 0          /* 是否修改主站参数 */
-#define MAN_FMMU    0          /* 是否手动输入 fmmu */
 
 /* 握手前的 REG/SDO 交互窗口（GM_Wait_Pilot_Data_Response）——主站 OP 之后、
  * 握手之前。设备参数（SDO）下发应落在这里。尚未实现。 */
@@ -60,7 +62,6 @@ typedef struct {
 } ErrorContext;
 
 void error_module_init(void);
-void error_module_destroy(void);
 
 typedef enum _EcatMasterError
 {

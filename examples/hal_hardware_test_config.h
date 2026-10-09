@@ -26,8 +26,8 @@ typedef struct {
 typedef struct {
     unsigned observe_cycles;      /* observe 用例执行的 wait/begin/commit 周期数。 */
     unsigned settle_cycles;       /* 等待使能、到位、停转或急停生效的最大周期数；超出判失败。 */
-    HalFeedHardwareCase feed[3];   /* feed[0..2] = 从站 3..5，逻辑轴 1..3。 */
-    HalSpindleHardwareCase spindle; /* 从站 2、逻辑轴 0 的主轴试验参数。 */
+    HalFeedHardwareCase feed[3];   /* feed[0..2] = 从站 3..5，逻辑轴 0..2。 */
+    HalSpindleHardwareCase spindle; /* 从站 2、逻辑轴 3 的主轴试验参数。 */
     uint32_t x_len;
     uint32_t y_len;
     uint8_t y_safe[HAL_TEST_IMAGE_MAX]; /* 整块 Y 的已审核安全输出值；零值不一定安全。 */

@@ -1,5 +1,5 @@
 /* HAL 运行层：context 生命周期 + 周期三原语（wait / begin / commit）。
- * 契约与设计推导见 docs/runtime.md、docs/rt-interface.md。 */
+ * 契约见 docs/api-reference.md；2026-10-04 修复依据见同日审查修复记录。 */
 
 #include "hal_c_api.h"
 #include "Greemaster/main_demo.h"
@@ -30,10 +30,14 @@ typedef struct {
 
     int      reset_state;    /* HAL_RESET_*：故障复位的进展 */
     uint64_t reset_deadline; /* 复位超时的周期号（c->cycle_seq 坐标系） */
+    int reset_high_next;     /* 先低后高，Fault 未消失时交替形成新边沿 */
+    uint64_t stop_cycle;     /* 本拍显式停止优先于复位；历史停止不阻挡后续清错 */
 
     int angle_base_valid; /* 主轴取消运动后，在再次就绪时用反馈重建刻度基准 */
     int angle_valid;      /* 上次受理的是普通刻度；避免浮点取模把重复命令变成整圈 */
     double angle_command; /* 上次受理的普通刻度原值（保留方向符号） */
+
+    int orient_state;   /* HAL_ORIENT_*：主轴定向进展；非 NONE 时暂停普通 DS402 推进 */
 
     int pos_dirty;      /* 有未下发的目标位置，commit 时写 0x607A */
     int speed_dirty;    /* 有未下发的目标速度，commit 时写 0x60FF */
@@ -43,7 +47,7 @@ typedef struct {
 
     uint32_t raw_pos;        /* 上一拍实际位置的原始计数（32 位），增量靠它算 */
     uint32_t pos_command;    /* 待下发的目标位置原始计数 */
-    uint32_t speed_command;  /* 待下发的目标速度原始计数（deg/s ÷ 命令当量） */
+    uint32_t speed_command;  /* 待下发的目标转速：整数 rpm，经命令方向反转 */
 
     double counts;           /* 展开后的累计反馈计数；线性按 32 位回绕，模按每转脉冲数 */
     double feedback_offset;  /* set_pos 平移坐标的偏置（用户单位），不写驱动器 */
@@ -88,8 +92,10 @@ struct HalContext {
     Io   ios[HAL_C_MAX_DEV];    /* 前 io_count 个有效 */
 };
 
-/* SDK 的主站是进程全局单例；所有 context 生命周期操作由调用方串行。 */
-static HalContext* owner;
+/* SDK 的主站是进程全局单例；所有 context 生命周期操作由调用方串行。
+ * 用原子指针：hal_context_request_stop() 允许与周期调用并发，它要读这个值，
+ * 而 start / stop 会写它。 */
+static _Atomic(HalContext*) owner;
 
 /* 统一的「填错误文本 + 返回码」出口，只用于非 RT 路径（RT 路径不碰 err 缓冲）。 */
 static int report(int code, char* err, uint32_t len, const char* detail) {
@@ -160,18 +166,32 @@ static uint64_t identity_hash(const DeviceSlot* s) {
 static int bind_axis(Axis* a, const DeviceSlot* slots, int count) {
     a->slot = -1;
     for (int i = 0; i < count; ++i) {
-        const DeviceSlot* s = &slots[i];
+        const DeviceSlot* s = &slots[i]; // 只认同一从站、同一轴序号的伺服或 GREE 轴
         if (s->slave_pos != a->cfg.slave_pos || s->axis_index != a->cfg.axis_index) continue;
         if (s->type != SERVO_TYPE && s->type != GREE_AXIS6_TYPE && s->type != GREE_AXIS4_TYPE) continue;
         a->slot = i;
+        /* 六个必需 PDO 的位长：**不是**一律"精确等于"，分两种判。
+         *   - 位置类 0x6064 / 0x607A **必须正好 32 位**：读取走 signed32()（写死 32 位补码），
+         *     写入要放完整 int32 计数。窄了会静默错符号/截断——16 位位置 PDO 会把 0xFFFF
+         *     当成 +65535 而不是 -1。这是"宁可拒绝启动，不要悄悄算错"的那一类。
+         *   - 其余四项只要**不窄于语义宽度**：驱动层读回来是右对齐的（见 entry_access.h），
+         *     位长宽了数值不变，窄了才丢位。状态字/控制字因此允许 16..32，模式字允许 8..32
+         *     —— 有的驱动器（如蓝海华腾）ESI 里 0x6060/0x6061 就声明成 16 位。 */
         const slave_addr* h = &s->entries.slave;
-        if (h->statusWord.bit_length != 16 || h->act_pos.bit_length != 32 ||
-            h->act_mode.bit_length != 8 || h->Control_word.bit_length != 16 ||
-            h->target_pos.bit_length != 32 || h->Modes_of_operation.bit_length != 8)
+        if (h->act_pos.bit_length != 32 || h->target_pos.bit_length != 32 ||
+            h->statusWord.bit_length < 16 || h->statusWord.bit_length > 32 ||
+            h->Control_word.bit_length < 16 || h->Control_word.bit_length > 32 ||
+            h->act_mode.bit_length < 8 || h->act_mode.bit_length > 32 ||
+            h->Modes_of_operation.bit_length < 8 || h->Modes_of_operation.bit_length > 32)
             return HAL_ERROR_UNSUPPORTED;
+        /* 速度与错误码是**可选能力**：位长不合规只降级成"没有这个能力"，不拒绝配置
+         * （has_speed / has_error 置 0，读出来记 0，hal_axis_capability 会报 UNSUPPORTED）。
+         * 唯一例外是主轴——转速读写是它的基本功能，缺速度 PDO 直接拒。 */
         a->has_speed = h->act_speed.bit_length == 32 && h->target_speed.bit_length == 32;
         a->has_error = h->error_code.bit_length == 16;
+        /* 主轴不允许没有速度模式*/
         if (a->spindle && !a->has_speed) return HAL_ERROR_UNSUPPORTED;
+        /* 填充身份信息 */
         a->identity.type = s->type;
         a->identity.vendor_id = s->vendor_id;
         a->identity.product_code = s->product_code;
@@ -281,20 +301,20 @@ int32_t hal_context_create(const HalCConfig* config, HalContext** out, char* err
 int32_t hal_context_start(HalContext* c, char* err, uint32_t len) {
     if (err && len) err[0] = 0;
     if (!c) return report(HAL_ERROR_ARGUMENT, err, len, "context 为空");
-    if (owner) return report(HAL_ERROR_BUSY, err, len, "主站已被启动的 context 占用");
+    if (atomic_load(&owner)) return report(HAL_ERROR_BUSY, err, len, "主站已被启动的 context 占用");
     reset_runtime(c);
     atomic_store(&c->stop_requested, 0);
-    owner = c;
+    atomic_store(&owner, c);
     struct timespec started, ended;
     if (clock_gettime(CLOCK_MONOTONIC, &started) != 0) {
-        owner = NULL;
+        atomic_store(&owner, NULL);
         return report(HAL_ERROR_BUS, err, len, "无法读取启动时钟");
     }
     MasterConfig cfg = {c->config.cycle_us, c->config.start_timeout_ms,
                         c->config.cycle_timeout_ms, c->config.dc_enable};
     const int driver_rc = ethercat_init(&cfg);
     if (driver_rc != 0) {
-        owner = NULL;
+        atomic_store(&owner, NULL);
         if (driver_rc == MASTER_DEVICE_DICTIONARY_ERROR)
             return report(HAL_ERROR_CONFIG, err, len,
                           "设备字典加载失败：检查 CNC_HAL_DEVICES_JSON 或安装目录中的 devices.json");
@@ -341,6 +361,9 @@ int32_t hal_context_start(HalContext* c, char* err, uint32_t len) {
     for (int i = 0; i < c->axis_count; ++i) {
         const int bind_rc = bind_axis(&c->axes[i], slots, n);
         if (bind_rc) {
+            /* 原样报出去：bind_axis 有意区分「PDO 位长不合规」(UNSUPPORTED) 与
+             * 「找不到匹配的轴」(CONFIG)。以前只当布尔用，外面一律看到 CONFIG。 */
+            result = bind_rc;
             const Axis* a = &c->axes[i];
             if (a->slot >= 0) {
                 snprintf(bind_detail, sizeof(bind_detail),
@@ -360,7 +383,8 @@ int32_t hal_context_start(HalContext* c, char* err, uint32_t len) {
         io->y = (uint32_t)(panel ? c->config.panels[j].y_start : c->config.ios[j].y_start);
         const int slave = panel ? c->config.panels[j].slave_pos : c->config.ios[j].slave_pos;
         detail = "IO/面板未找到、类型不匹配或 PDO 位宽无效";
-        if (bind_io(io, slots, n, slave, panel)) goto bad;
+        const int io_rc = bind_io(io, slots, n, slave, panel);
+        if (io_rc) { result = io_rc; goto bad; }   /* 同上，别丢返回码 */
         detail = "IO 与面板的 X/Y 地址段重叠";
         for (int k = 0; k < i; ++k)
             if (overlap(io->x, io->in_bytes, c->ios[k].x, c->ios[k].in_bytes) ||
@@ -377,7 +401,7 @@ int32_t hal_context_start(HalContext* c, char* err, uint32_t len) {
     return HAL_OK;
 bad:
     (void)ethercat_close();
-    owner = NULL;
+    atomic_store(&owner, NULL);
     reset_runtime(c);
     return report(result, err, len, detail);
 }
@@ -390,7 +414,7 @@ bad:
 int32_t hal_context_request_stop(HalContext* c) {
     if (!c) return HAL_ERROR_ARGUMENT;
     atomic_store(&c->stop_requested, 1);
-    Master_RequestStop();
+    if (atomic_load(&owner) == c) Master_RequestStop();
     return HAL_OK;
 }
 
@@ -399,7 +423,7 @@ int32_t hal_context_stop(HalContext* c) {
     if (!c) return HAL_ERROR_ARGUMENT;
     atomic_store(&c->stop_requested, 1);
     int rc = 0;
-    if (owner == c) { rc = ethercat_close(); owner = NULL; }
+    if (atomic_load(&owner) == c) { rc = ethercat_close(); atomic_store(&owner, NULL); }
     reset_runtime(c);
     return rc ? HAL_ERROR_BUS : HAL_OK;
 }
@@ -436,6 +460,14 @@ int32_t hal_device_identity(const HalContext* c, HalAxisId id, HalCIdentity* out
     return HAL_OK;
 }
 
+/* 轴能力查询。答案全部来自 **start 认领设备时定下的绑定结果**（有没有速度 PDO、
+ * 有没有错误码 PDO），不访问总线，所以运行期也不会变。
+ *
+ * 两点容易误用：
+ *   - 拿不到的能力**不算错误**：返回 0，但把 state 置成 HAL_CAP_UNSUPPORTED，并在
+ *     reason 里写明缺什么。所以"能不能用"要看 state，不能只看返回值。
+ *   - function 只收 POSITION / SPEED / ERROR_CODE。ALARM_CONTROL 是**从站级**能力，
+ *     归 hal_slave_capability，这里按参数错误拒掉——上面那个范围判断就是干这个的。 */
 int32_t hal_axis_capability(const HalContext* c, HalAxisId id, uint32_t function,
                             HalCCapability* out) {
     if (!c || !out || function < HAL_FUNC_POSITION || function > HAL_FUNC_ERROR_CODE)
@@ -562,75 +594,113 @@ static int sample_axis(Axis* a) {
     a->speed.enabled = a->status.enabled;
     a->speed.raw_status = (uint16_t)sw;
     a->speed.position_deg = a->status.actual_pos;
-    /* 速度 PDO 的单位假定为 rpm，不做任何当量换算——直接就是转速。
-     * 2026-09-30 更正：此前按 counts/s 换算（× 反馈当量 ÷ 6），是错的。
-     * 以台架主轴当量 0.16 deg/count 为例，那个假设会让读侧把 1000 rpm 报成
-     * 26.7 rpm、写侧把 37.5 倍放大（见 docs/rt-interface.md 的说明）。
-     * 注意：若某台驱动器的速度对象单位是 0.1 rpm（不少驱动默认如此），这里
-     * 还要再乘 10 —— 换机器前先核对对象字典。 */
-    a->speed.actual_speed = a->has_speed ? signed32(velocity) : 0;
+    /* 速度 PDO 的单位假定为 rpm，不做任何当量换算——直接就是转速*/
+    a->speed.actual_speed = a->has_speed ?
+        signed32(velocity) * (a->cfg.feedback_invert ? -1 : 1) : 0;
+    /* 轴状态里给**同一份**读数：进给轴拿不到 spindle 那个出参（它要求主轴），而实际
+     * 速度是进给率显示要用的。两者必须同源，别让它们各算一遍漂开。 */
+    a->status.actual_speed = a->speed.actual_speed;
+    a->status.speed_valid = a->has_speed;
     if (!isfinite(a->status.actual_pos) || !isfinite(a->speed.actual_speed)) return HAL_ERROR_BUS;
-    a->speed.at_speed = a->spindle && a->status.enabled && mode == DS402_MODE_CSV &&
-        fabs(a->speed.actual_speed - a->speed.command_speed) <= a->spindle_cfg.speed_window;
     return HAL_OK;
 }
 
-/* 周期第二拍：采所有轴、各推一拍 DS402、读 IO 输入。此后 read_* 才有效。
- * 使能/取消运动/急停留下的 zero_speed 在这里发一次速度目标 0，
- * 防止上一轮的转速在本拍被重新写下去。 */
+/* 周期第二拍：采样所有轴、各推一拍 DS402、读 IO 输入。走过这一拍，read_* 才有效。 */
 int32_t hal_rt_begin_cycle(HalContext* c) {
     int rc = gate(c); if (rc) return rc;
-    if (c->phase != 1) return HAL_ERROR_STATE;
+    if (c->phase != 1) return HAL_ERROR_STATE;   /* 必须已经 wait 过 */
     ++c->cycle_seq;   /* 本拍编号。故障复位的超时判据按它算，不打时钟 */
+    const int axis_count = c->axis_count; /* 两遍遍历使用同一绑定数量。 */
     Ds402Step planned[HAL_C_MAX_DEV + HAL_C_MAX_SPINDLE];
     uint32_t presets[HAL_C_MAX_DEV + HAL_C_MAX_SPINDLE];
     uint8_t override_preset[HAL_C_MAX_DEV + HAL_C_MAX_SPINDLE] = {0};
-    /* 所有轴先采样并检查换算，再写任何控制 PDO；后面的轴不能让前面的轴半途使能。 */
-    for (int i = 0; i < c->axis_count; ++i) {
+    uint8_t reset_control[HAL_C_MAX_DEV + HAL_C_MAX_SPINDLE] = {0};
+    /* ---- 第一遍：只决定这拍写什么 ----
+     * 所有轴先采样并检查换算，再写任何控制 PDO；后面的轴不能让前面的轴半途使能。 */
+    for (int i = 0; i < axis_count; ++i) {
         Axis* a = &c->axes[i];
         if (sample_axis(a)) return bus_error(c);
         /* 故障复位的收尾判断。必须在算 planned[] 之前——结论会改 a->request，
          * 而 request 正是这一拍状态机的输入。 */
         if (a->reset_state == HAL_RESET_PENDING) {
+            reset_control[i] = 1;
             if (!(a->status.raw_status & DS402_SW_BIT_FAULT)) {
                 a->reset_state = HAL_RESET_DONE;
                 a->request = DS402_REQ_DISABLE;      /* 终态一律未使能，见 API 注释 */
-            } else if (c->cycle_seq >= a->reset_deadline) {
+            } else if (a->reset_deadline && c->cycle_seq >= a->reset_deadline) {
                 a->reset_state = HAL_RESET_TIMEOUT;
                 a->request = DS402_REQ_DISABLE;
             }
         }
+        /* 按当前状态字推出这拍要写的控制字与期望模式。 */
         planned[i] = Ds402_NextStepReq(a->status.raw_status, (uint16_t)a->mode,
             a->request, (uint16_t)a->desired_mode, DS402_MODESW_DISABLE_FIRST);
+        /* 主轴定向：厂商专有控制字，暂停普通 DS402 推进。
+         * 完成位在状态字上——定完置 DONE 但**继续发控制字**，保持对准直到 release。 */
+        if (a->spindle && a->orient_state != HAL_ORIENT_NONE) {
+            const uint16_t omask = a->cfg.vendor_orient_done_mask;
+            if (a->orient_state == HAL_ORIENT_RUNNING && omask &&
+                (a->status.raw_status & omask))
+                a->orient_state = HAL_ORIENT_DONE;
+        }
+        if (reset_control[i]) {
+            /* 低电平先发送，第一次高电平才开始计超时；终态也必须释放 bit7。
+             * 不调用无记忆的 Master_ServoStep，避免它每拍重复写同一高电平。 */
+            planned[i] = (Ds402Step){DS402_STEP_DROP_VOLTAGE, 0, 0xFFFFu, 0};
+            if (a->reset_state == HAL_RESET_PENDING && a->reset_high_next) {
+                planned[i].kind = DS402_STEP_FAULT_RESET;
+                planned[i].control_word = DS402_CW_FAULT_RESET;
+                if (!a->reset_deadline) {
+                    const uint64_t us = (uint64_t)c->config.fault_reset_timeout_ms * 1000u;
+                    const uint64_t cycles = (us + c->config.cycle_us - 1u) / c->config.cycle_us;
+                    a->reset_deadline = c->cycle_seq + cycles;
+                }
+            }
+        }
+        /* 只在"命令与反馈坐标系不同"时才算预置目标值；同坐标系交给驱动层。 */
         override_preset[i] = planned[i].preset_target &&
             (command_scale(a) != feedback_scale(a) ||
              a->command_offset != a->feedback_offset);
+        /* 预置值超出 int32 就直接返回——此时**一个控制 PDO 都还没写**。 */
         if (override_preset[i] &&
             to_counts((a->status.actual_pos - a->command_offset) / command_scale(a), &presets[i]))
             return HAL_ERROR_ARGUMENT;
     }
-    for (int i = 0; i < c->axis_count; ++i) {
+    /* ---- 第二遍：真正写总线。任一次读写失败都走 bus_error()，首个错误码被闭锁。 ---- */
+    for (int i = 0; i < axis_count; ++i) {
         Axis* a = &c->axes[i];
+        /* 使能、取消运动、急停留下的清零，在这里补发一次速度目标 0；
+         * 不补的话，驱动器会继续按上一轮的目标转速跑。 */
         if (a->zero_speed && a->has_speed) {
             if (Master_ServoWrite(a->slot, DEV_DICT_ROLE_TARGET_SPEED, 0)) return bus_error(c);
             a->zero_speed = 0;
         }
-        if (Master_ServoStep(a->slot, a->request, (uint16_t)a->desired_mode, NULL)) return bus_error(c);
+        if (reset_control[i]) {
+            if (Master_ServoWrite(a->slot, DEV_DICT_ROLE_CONTROL_WORD, planned[i].control_word))
+                return bus_error(c);
+            a->reset_high_next = !a->reset_high_next;
+        } else if (Master_ServoStep(a->slot, a->request, (uint16_t)a->desired_mode, NULL)) {
+            return bus_error(c);
+        }
         /* 同一计数坐标系沿用驱动层的原始 PDO 预置；不同坐标系才覆盖。 */
         if (planned[i].preset_target) {
             if (override_preset[i] &&
                 Master_ServoWrite(a->slot, DEV_DICT_ROLE_TARGET_POS, presets[i])) return bus_error(c);
-            a->status.command_pos = a->status.actual_pos;
+            a->status.command_pos = a->status.actual_pos;   /* 命令侧拉平到反馈，免得下一拍写位置时跳 */
             a->angle_valid = 0;
         }
         if (a->request == DS402_REQ_ENABLE) a->stop_override = 0;
+        /* motion_ready = 已请求使能、且状态机这拍已 DONE。它是 write_* 的受理条件之一。 */
         a->motion_ready = a->request == DS402_REQ_ENABLE && planned[i].kind == DS402_STEP_DONE;
+        /* 主轴首次就绪时把刻度基准锚在当前位置——此后 write_pos 的 deg 相对它算。 */
         if (a->spindle && a->motion_ready && !a->angle_base_valid) {
             a->status.command_pos = a->status.actual_pos;
             a->angle_base_valid = 1;
             a->angle_valid = 0;
         }
     }
+    /* 先清空本拍输入映像，再逐 Entry 读并**按位展开**成字节映像（不是整字对齐）。
+     * Entry 位长与绑定时记录的不一致 → 总线错误。 */
     for (int i = 0; i < c->io_count; ++i) {
         Io* io = &c->ios[i];
         memset(io->inputs, 0, sizeof(io->inputs));
@@ -660,7 +730,13 @@ int32_t hal_rt_commit_cycle(HalContext* c) {
             if (Master_ServoWrite(a->slot, DEV_DICT_ROLE_TARGET_SPEED, 0)) return bus_error(c);
             a->zero_speed = 0;
         }
-        if (a->stop_override && Master_ServoWrite(a->slot, DEV_DICT_ROLE_CONTROL_WORD,
+        if (a->orient_state != HAL_ORIENT_NONE && !a->stop_override) {
+            /* 定向控制字整字覆盖普通控制字。急停仍然优先，所以只在不急停时发。
+             * 定完也继续发——保持驱动器对准，直到 release。 */
+            if (Master_ServoWrite(a->slot, DEV_DICT_ROLE_CONTROL_WORD,
+                                  a->cfg.vendor_orient_control_word))
+                return bus_error(c);
+        } else if (a->stop_override && Master_ServoWrite(a->slot, DEV_DICT_ROLE_CONTROL_WORD,
             a->stop_override == HAL_ESTOP_DISABLE_VOLTAGE ? DS402_CW_DISABLE_VOLTAGE : DS402_CW_SWITCH_ON))
             return bus_error(c);
         if (a->pos_dirty && Master_ServoWrite(a->slot, DEV_DICT_ROLE_TARGET_POS, a->pos_command)) return bus_error(c);
@@ -689,7 +765,6 @@ static void cancel_motion(Axis* a) {
     a->motion_ready = 0;
     a->zero_speed = 1;
     a->speed.command_speed = 0;
-    a->speed.at_speed = 0;
 }
 
 /* on/off 二值，其它值拒绝。请求真的变了才取消运动，重复调用不会反复丢指令。
@@ -698,10 +773,19 @@ int32_t hal_rt_axis_enable(HalContext* c, HalAxisId id, int32_t on) {
     int rc = gate(c); if (rc) return rc;
     Axis* a = find_axis(c, id);
     if (!a || (on != 0 && on != 1)) return HAL_ERROR_ARGUMENT;
-    const Ds402Request req = on ? DS402_REQ_ENABLE : DS402_REQ_DISABLE;
+    /* 去使能不能把已有撤销电压停止降成 0x07（会重新设置 enable-voltage 位）。
+     * 撤销电压只由显式上使能或后续拍受理的故障复位解除。 */
+    const Ds402Request req = on ? DS402_REQ_ENABLE :
+        a->stop_override == HAL_ESTOP_DISABLE_VOLTAGE ? DS402_REQ_DROP_VOLTAGE : DS402_REQ_DISABLE;
+    if (on && a->reset_state == HAL_RESET_PENDING) return HAL_ERROR_NOT_RUNNING;
     if (a->request != req) cancel_motion(a);
     a->request = req;
-    if (!on) a->stop_override = HAL_ESTOP_DISABLE_OPERATION;
+    if (!on) {
+        if (a->stop_override != HAL_ESTOP_DISABLE_VOLTAGE)
+            a->stop_override = HAL_ESTOP_DISABLE_OPERATION;
+        a->stop_cycle = c->cycle_seq;
+        if (a->reset_state == HAL_RESET_PENDING) a->reset_state = HAL_RESET_NONE;
+    }
     return HAL_OK;
 }
 
@@ -716,26 +800,28 @@ int32_t hal_rt_axis_estop(HalContext* c, HalAxisId id) {
     cancel_motion(a);
     a->request = a->cfg.estop_action == HAL_ESTOP_DISABLE_OPERATION ? DS402_REQ_DISABLE : DS402_REQ_DROP_VOLTAGE;
     a->stop_override = a->cfg.estop_action;
+    a->stop_cycle = c->cycle_seq;
+    if (a->reset_state == HAL_RESET_PENDING) a->reset_state = HAL_RESET_NONE;
     a->desired_mode = a->mode == DS402_MODE_CSV ? DS402_MODE_CSV : DS402_MODE_CSP;
     return HAL_OK;
 }
 
-/* 只在 CSP + 已使能 + 状态机到位时受理，否则返回 NOT_RUNNING（沿用公共码，不为
- * 「还没准备好」新造一个）。写的是命令侧坐标，按 command_offset 和命令当量换算。 */
+/* 非阻塞故障复位请求。公共 gate、写入窗口与同拍停止优先级先检查，
+ * 下一个 begin 从低电平准备开始；不恢复运动使能。 */
 int32_t hal_rt_axis_fault_reset(HalContext* c, HalAxisId id) {
     /* 与其它写接口同一条纪律：只允许周期线程在 begin 与 commit 之间改 request。 */
-    if (!c) return HAL_ERROR_ARGUMENT;
+    const int rc = gate(c); if (rc) return rc;
     if (c->phase != 2) return HAL_ERROR_STATE;
     Axis* a = find_axis(c, id);
     if (!a) return HAL_ERROR_ARGUMENT;
+    if (a->stop_override && a->stop_cycle == c->cycle_seq) return HAL_ERROR_STATE;
     /* 故障复位意味着之前那些运动意图都不作数了。 */
     cancel_motion(a);
     a->request = DS402_REQ_FAULT_RESET;
     a->reset_state = HAL_RESET_PENDING;
-    /* 超时按周期数算而不是打时钟：热路径上不取时间，且与周期配置天然自洽。
-     * 向上取整到至少 1 拍，免得周期比 1ms 还长时算成 0 直接判超时。 */
-    const uint64_t cycles = (uint64_t)c->config.fault_reset_timeout_ms * 1000u / c->config.cycle_us;
-    a->reset_deadline = c->cycle_seq + (cycles ? cycles : 1u);
+    a->stop_override = 0; /* 后续显式清错允许覆盖历史停止，但不会使能。 */
+    a->reset_high_next = 0;
+    a->reset_deadline = 0; /* 从第一个实际准备发送的高电平开始计时。 */
     return HAL_OK;
 }
 
@@ -751,8 +837,12 @@ int32_t hal_rt_axis_write_pos(HalContext* c, HalAxisId id, double pos) {
     int rc = gate(c); if (rc) return rc;
     Axis* a = find_axis(c, id);
     if (!a || !isfinite(pos)) return HAL_ERROR_ARGUMENT;
-    if (c->phase != 2 || !a->motion_ready || !a->status.enabled || a->request != DS402_REQ_ENABLE ||
-        a->desired_mode != DS402_MODE_CSP || a->mode != DS402_MODE_CSP) return HAL_ERROR_NOT_RUNNING;
+    /* 受理条件整体不变，只把"没使能"和"模式不符"分出来。
+     * 不拆成三段早期返回：那会改变受理边界（例如 motion_ready 为假但使能位仍为 1 时
+     * 会从拒收变成受理），进而影响已在跑的时序。 */
+    if (c->phase != 2) return HAL_ERROR_NOT_RUNNING;   /* 调用时机，不是使能问题 */
+    if (!a->motion_ready || !a->status.enabled) return HAL_ERROR_NOT_ENABLED;
+    if (a->desired_mode != DS402_MODE_CSP || a->mode != DS402_MODE_CSP) return HAL_ERROR_MODE_MISMATCH;
     /* 同一计数坐标系用本拍原始 PDO 加有符号位移，允许累计坐标跨 32 位回绕。 */
     if (command_scale(a) == feedback_scale(a) &&
         a->command_offset == a->feedback_offset) {
@@ -840,21 +930,84 @@ int32_t hal_rt_spindle_request_mode(HalContext* c, HalAxisId id, HalSpindleMode 
 }
 
 /* 只在 CSV + 已使能 + 状态机到位时受理。rpm 与 dir 分开传：正负号是转向语义
- * （M03/M04），所以 rpm 本身不许为负。换算 ×6 把 rpm 折成 deg/s（360°/60s）。
- * at_speed 在这里先按指令值算一遍，下一拍采样再按实测刷新。 */
+ * （M03/M04），所以 rpm 本身不许为负。速度 PDO 单位暂按整数 rpm。 */
 int32_t hal_rt_spindle_write_speed(HalContext* c, HalAxisId id, double rpm, int32_t dir) {
     int rc = spindle_gate(c, id); if (rc) return rc;
     Axis* a = find_axis(c, id);
     if (!isfinite(rpm) || rpm < 0 || rpm > a->spindle_cfg.max_speed || dir < -1 || dir > 1) return HAL_ERROR_ARGUMENT;
-    if (c->phase != 2 || !a->motion_ready || !a->status.enabled || a->request != DS402_REQ_ENABLE ||
-        a->desired_mode != DS402_MODE_CSV || a->mode != DS402_MODE_CSV) return HAL_ERROR_NOT_RUNNING;
+    /* 同上：受理条件不变，只细分错误码。 */
+    if (c->phase != 2) return HAL_ERROR_NOT_RUNNING;
+    if (!a->motion_ready || !a->status.enabled) return HAL_ERROR_NOT_ENABLED;
+    if (a->desired_mode != DS402_MODE_CSV || a->mode != DS402_MODE_CSV) return HAL_ERROR_MODE_MISMATCH;
     /* 与读侧同一约定：速度 PDO 就是 rpm，不做当量换算。
      * to_counts 会四舍五入到整数——驱动器速度单位若比 1 rpm 更细，精度在这里丢失。 */
-    rc = to_counts(rpm * dir, &a->speed_command);
+    rc = to_counts(rpm * dir * (a->cfg.command_invert ? -1 : 1), &a->speed_command);
     if (rc) return rc;
     a->speed_dirty = 1;
     a->speed.command_speed = rpm * dir;
-    a->speed.at_speed = fabs(a->speed.actual_speed - a->speed.command_speed) <= a->spindle_cfg.speed_window;
+    return HAL_OK;
+}
+
+/* ---- 读写就绪诊断 ----
+ * 只读回答"HAL 侧还差什么才能受理运动指令"，判据与 write_pos / write_speed 的
+ * 受理条件对齐：窗口内 + 已使能 + 状态机到位 + **实际模式跟上 HAL 要求的模式**。
+ *
+ * **不含"你要写哪条指令"这一维**：write_pos 要 CSP、write_speed 要 CSV，而这里只比
+ * "实际模式 vs HAL 记录的期望模式"。所以正确的调用顺序是：先
+ * hal_rt_spindle_request_mode() 把期望模式设对，等本查询全 0，再下发。
+ *
+ * 早先的实现拿**配置的 work_mode** 当"目标模式"比，于是主轴（配置是速度模式）
+ * 一旦为了 M29/攻丝切到位置模式，它就永远报"没就绪"——而那时 write_pos 明明是受理的。 */
+uint32_t axis_readiness_bits(const HalContext* c, const Axis* a) {
+    uint32_t r = 0;
+    if (!c || !a) return HAL_READY_PHASE;
+    if (c->phase != 2)              r |= HAL_READY_PHASE;
+    if (!a->status.enabled)         r |= HAL_READY_NOT_ENABLED;
+    if (!a->motion_ready)           r |= HAL_READY_NOT_READY;
+    if (a->mode != a->desired_mode) r |= HAL_READY_MODE_ACTUAL;
+    return r;
+}
+
+int32_t hal_rt_axis_readiness(HalContext* c, HalAxisId id, uint32_t* out) {
+    const int rc = gate(c); if (rc) return rc;
+    if (!out) return HAL_ERROR_ARGUMENT;
+    const Axis* a = find_axis(c, id);
+    if (!a) return HAL_ERROR_ARGUMENT;
+    *out = axis_readiness_bits(c, a);
+    return HAL_OK;
+}
+
+/* ---- 主轴定向（厂商专有控制字）----
+ * 只做机制：值与位都从配置来，HAL 不假设任何厂商语义。
+ *
+ * **不动使能意图**：定向期间只是控制字被厂商值接管，`a->request` 始终由上层通过
+ * hal_rt_axis_enable() 表达。释放时也只清定向状态，不替上层决定要不要上力矩。 */
+int32_t hal_rt_spindle_request_orient(HalContext* c, HalAxisId id) {
+    const int rc = spindle_gate(c, id); if (rc) return rc;
+    Axis* a = find_axis(c, id);
+    if (!a->cfg.vendor_orient_control_word || !a->cfg.vendor_orient_done_mask)
+        return HAL_ERROR_UNSUPPORTED;       /* 没配定向，不静默当成功 */
+    if (c->phase != 2) return HAL_ERROR_NOT_RUNNING;
+    if (!a->status.enabled) return HAL_ERROR_NOT_ENABLED;
+    a->orient_state = HAL_ORIENT_RUNNING;
+    return HAL_OK;
+}
+
+int32_t hal_rt_spindle_orient_state(HalContext* c, HalAxisId id, int32_t* out) {
+    const int rc = spindle_gate(c, id); if (rc) return rc;
+    if (!out) return HAL_ERROR_ARGUMENT;
+    *out = find_axis(c, id)->orient_state;
+    return HAL_OK;
+}
+
+int32_t hal_rt_spindle_release_orient(HalContext* c, HalAxisId id) {
+    const int rc = spindle_gate(c, id); if (rc) return rc;
+    Axis* a = find_axis(c, id);
+    /* 只做一件事：把控制字交回普通 DS402 状态机。
+     * **不碰 a->request**——释放之后轴要不要上力矩是上层的决定，由
+     * hal_rt_axis_enable() 表达。以前这里硬写 ENABLE，等于把上层刚下的
+     * 去使能静默吃掉（context_regression 的 orient_release_keeps_enable_intent 钉住了）。 */
+    a->orient_state = HAL_ORIENT_NONE;
     return HAL_OK;
 }
 

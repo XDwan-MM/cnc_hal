@@ -22,7 +22,7 @@ extern "C" {
  *                         直到 stop/start 清掉。request_stop 只写通知、不释放资源，
  *                         仍须走 stop/destroy。
  *
- * 详细契约见 docs/rt-interface.md。 */
+ * 详细契约见 docs/api-reference.md 第 4 章「周期接口与线程约束」。 */
 
 /**
  * @brief 周期第一拍：等主站的下一个周期
@@ -57,6 +57,8 @@ int32_t hal_rt_commit_cycle(HalContext* c);
  * @brief 使能 / 去使能一根进给轴
  *
  * 去使能停在 SwitchedOn（可收指令、不带载），不是断电——要断电用 hal_rt_axis_estop。
+ * 已有撤销电压急停覆盖时，on=0 保持断电，不降成 0x07；显式 on=1 或后续拍
+ * 受理的故障复位可解除历史覆盖，同拍停止仍优先。
  * 请求发生变化会丢弃该轴尚未提交的运动指令，恢复运动须重新下发目标位置。
  *
  * @param c  已 start 的 context
@@ -96,15 +98,21 @@ int32_t hal_rt_axis_read_pos(HalContext* c, HalAxisId id, double* pos);
  * @brief 请求清除驱动器的故障（DS402 Fault Reset）
  *
  * 非阻塞：只置意图，真正的控制字边沿（0x0080）由之后的 hal_rt_begin_cycle 产生。
- * 边沿在状态字仍带 Fault 位（0x0008）时每拍重发，直到驱动器离开 Fault 或超时
- * （配置的 fault_reset_timeout_ms）。
+ * 先发送一拍 0x0000，再交替发送 0x0080/0x0000，形成完整 bit7 上升沿。
+ * Fault 消失或超时后发送 0x0000 释放 bit7；超时从首次高电平拍起算，
+ * fault_reset_timeout_ms 按 cycle_us 向上取整，热路径不取时钟。
  *
  * **终态一律是未使能**——不论成功、超时还是中途被急停打断，轴都不会自动恢复使能。
  * 要重新运动必须显式 hal_rt_axis_enable()，且要再经一次 begin 确认状态机到位。
  * 这是有意的：驱动器刚从故障恢复时自动上使能是危险的。
  *
- * 幂等：重复调用等于刷新一次请求（超时重新计时）。
- * 急停优先：请求复位期间调 hal_rt_axis_estop() 会覆盖它，安全路径不被复位流程挡住。
+ * 重复调用刷新请求：从低电平准备阶段重新开始，首次高电平拍重新计超时；
+ * 刷新请求不能代替查询 hal_rt_axis_fault_reset_state()。
+ * 急停/去使能优先：同拍已有停止请求时返回 HAL_ERROR_STATE；复位期间的停止
+ * 取消复位，状态回到 HAL_RESET_NONE。后续拍可显式请求复位，仍不会自动使能。
+ * 后续拍受理复位会清除此前急停/去使能的停止动作覆盖（stop_override）。
+ * 一次停止请求不是永久闩锁；持续急停须每拍请求停止，条件解除前禁止发起复位。
+ * 复位 PENDING 时使能返回 HAL_ERROR_NOT_RUNNING；停止通知/总线闭锁按公共码拒绝。
  *
  * @param c  已 start 的 context
  * @param id 逻辑轴号
@@ -176,8 +184,7 @@ int32_t hal_rt_spindle_enable(HalContext* c, HalAxisId id, int32_t on);
  * @brief 在 CSV 模式下下发转速指令
  *
  * 只在「本拍已 begin 且未 commit」+ 该轴已使能 + 状态机已到位 + 运行模式确为 CSV 时
- * 受理。转向由 dir 决定，所以 rpm 本身不接受负值
- * 本拍带出的 at_speed 先按指令值算，下一拍采样时再按实测刷新。
+ * 受理。转向由 dir 决定，所以 rpm 本身不接受负值。
  *
  * @param c   已 start 的 context
  * @param id  逻辑轴号，且必须是主轴
@@ -202,10 +209,121 @@ int32_t hal_rt_spindle_read_speed(HalContext* c, HalAxisId id, double* rpm);
  *
  * @param c   已 start 的 context
  * @param id  逻辑轴号，且必须是主轴
- * @param out 带出转速侧快照，含 at_speed（|指令 - 实际| 是否已进入转速窗口）
+ * @param out 带出转速侧快照
  * @return int32_t 0 = 成功；HAL_ERROR_NOT_RUNNING = 还没跑过 begin，没有快照；其余见文件头
  */
 int32_t hal_rt_spindle_read_status(HalContext* c, HalAxisId id, HalCSpindleStatus* out);
+
+/* ============================================================================
+ * 主轴定向：厂商专有控制字，以及它为什么要「整字覆盖」
+ *
+ * 背景：控制字 0x6040 是命令驱动器的**唯一通道**——使能、去使能、清错、急停全靠
+ * 改这 16 位。平时由 DS402 状态机按状态字推导，只会给出标准里那几个值
+ * （0x0000 / 0x0006 / 0x0007 / 0x000F / 0x0080）；上层只说意图，说不了"写什么字"。
+ *
+ * 定向不在这套语义里。以台架驱动器为例，它要的是 0x040F：
+ *
+ *     0x040F = 0000 0100 0000 1111
+ *                   ↑         ↑
+ *                 bit10     低 4 位 = 0x0F（Enable operation）
+ *
+ * 低 4 位是标准的"使能运行"，bit10 是**厂商自定义**的"开始定向"。这个字是一个
+ * 完整的厂商指令，表达不了标准语义——0x0F 会把 bit10 冲掉，定向就永远开始不了。
+ *
+ * 所以定向期间的做法是**整字覆盖**：不再让状态机算，直接把配置里的
+ * vendor_orient_control_word 每拍写下去。优先级是
+ *
+ *     急停  >  定向控制字  >  普通 DS402 推进
+ *
+ * 急停永远最优先：定向期间按急停仍走 0x07（去使能）或 0x00（断电），
+ * 不会被厂商字挡住。
+ *
+ * 代价与约束（用之前先读这段）：
+ *
+ * 1. 定向期间控制字不在标准 DS402 语义下，HAL 不再保证它合规。驱动器收到那个字
+ *    会做什么取决于厂商文档（我们的样例是"自行减速并对准"，完成后置状态字
+ *    vendor_orient_done_mask）。HAL 只做机制，不假设语义。
+ *
+ * 2. 进入定向会把状态机推到 SwitchedOn（控制字变 0x07，带电不带载）——驱动器
+ *    收到厂商字后状态字跟着变，状态机看到"没使能"就会这么推。这是厂商机制的
+ *    副作用，不是我们算错。**所以释放之后不是原样恢复，要重新爬上
+ *    OperationEnabled**（见 release_orient）。
+ *
+ * 3. **必须有人负责释放。** 拿到 DONE 之后不 release，驱动器会一直停在那个厂商
+ *    状态，普通 M3/M4 再也接管不了。调用方要保证"请求 → 等 DONE → 释放"这条链
+ *    在异常路径上也能走到。
+ *
+ * 4. 值与位都是驱动器专有的，所以由配置给（HalCAxisCfg 的
+ *    vendor_orient_control_word / vendor_orient_done_mask）。两个都为 0 表示该轴
+ *    不支持定向，此时 request_orient 返回 HAL_ERROR_UNSUPPORTED——**不会静默当成
+ *    成功**。
+ * ========================================================================== */
+
+/**
+ * @brief 请求主轴定向（厂商专有控制字）
+ *
+ * 受理后 HAL 每拍下发 vendor_orient_control_word，普通 DS402 推进暂停，
+ * 直到 release。为什么必须整字覆盖、有哪些代价，见上面那段。
+ *
+ * @param c  已 start 的 context
+ * @param id 逻辑轴号，且必须是主轴
+ * @return int32_t 0 = 已受理；HAL_ERROR_UNSUPPORTED = 该轴没配定向控制字；
+ *                 HAL_ERROR_NOT_RUNNING = 不在 begin 与 commit 之间；
+ *                 HAL_ERROR_NOT_ENABLED = 还没到 OperationEnabled；其余见文件头
+ */
+int32_t hal_rt_spindle_request_orient(HalContext* c, HalAxisId id);
+
+/**
+ * @brief 定向是否已完成（状态字的 done 位）
+ *
+ * 只读。调用方轮询到 HAL_ORIENT_DONE 后才算定向到位。
+ *
+ * @param c  已 start 的 context
+ * @param id 逻辑轴号，且必须是主轴
+ * @param out 带出 HAL_ORIENT_*
+ * @return int32_t 0 = 成功；其余见文件头
+ */
+int32_t hal_rt_spindle_orient_state(HalContext* c, HalAxisId id, int32_t* out);
+
+/**
+ * @brief 释放定向，交回普通 DS402 状态机
+ *
+ * 只做一件事：清掉定向状态，让普通 DS402 控制字重新接管。
+ *
+ * **不改变使能意图。** 释放之后轴要不要上力矩是上层的决定，由 hal_rt_axis_enable()
+ * 表达；HAL 不替它选。上层若希望释放后继续运转/保持力矩，自己声明使能即可。
+ *
+ * @param c  已 start 的 context
+ * @param id 逻辑轴号，且必须是主轴
+ * @return int32_t 0 = 成功；其余见文件头
+ */
+int32_t hal_rt_spindle_release_orient(HalContext* c, HalAxisId id);
+
+/**
+ * @brief 读一根轴还差什么才能受理运动指令
+ *
+ * **只读当前状态，不改任何东西。** 给 write_pos / write_speed 失败后的归因用：
+ * 那两个接口把「没使能」「模式没到位」都折进一个返回码，上层分不清该等什么。
+ *
+ * 各位的含义（=1 表示该项不满足）：
+ *   bit0 PHASE       不在 begin 与 commit 之间（调用时机错）
+ *   bit1 NOT_ENABLED 尚未到 OperationEnabled
+ *   bit2 NOT_READY   状态机或采样还没到位
+ *   bit4 MODE_ACTUAL 驱动器实际模式（0x6061）还没跟上 HAL 要求的模式（切换还没生效）
+ *
+ * 全 0 = 就绪。**正常追赶模式切换时会短暂非零，不是故障**——只有持续非零才要处置。
+ *
+ * @note **这里不管你要写的是哪条指令。** HAL 要求的模式由
+ *       hal_rt_spindle_request_mode() 设定（默认取配置的工作模式），本查询只比
+ *       「实际 vs 要求」。而 write_pos 要 CSP、write_speed 要 CSV，所以顺序应该是：
+ *       先 request_mode 把期望模式设对 → 等本查询全 0 → 再下发。
+ *
+ * @param c   已 start 的 context
+ * @param id  逻辑轴号
+ * @param out 带出上面那个位掩码
+ * @return int32_t 0 = 成功；HAL_ERROR_ARGUMENT = 轴号不存在或 out 为空；其余见文件头
+ */
+int32_t hal_rt_axis_readiness(HalContext* c, HalAxisId id, uint32_t* out);
 
 /**
  * @brief 急停一根主轴

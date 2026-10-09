@@ -8,7 +8,8 @@
 #include <time.h>
 
 static uint64_t fake_ms;
-static uint32_t start_seconds, active_seconds, op_seconds, sync_seconds;
+static uint32_t start_seconds, active_seconds, op_seconds, sync_seconds, master_cycle;
+static int* eeprom_interrupt_ptr;   /* GM_EEPROM_Get 收到的打断标志地址 */
 static int advance_start_ms, stop_during_wait;
 int __wrap_clock_gettime(clockid_t id, struct timespec* ts) {
     ts->tv_sec = (time_t)(fake_ms / 1000);
@@ -30,6 +31,7 @@ static const char* fail_call;
 static int fail_code = -7, fail_index, fail_nth = 1;
 static int sdk_calls, allocations, releases, closes, io_releases, handshakes;
 static int slaves = 1, bad_eeprom, missing_mode, missing_optional, wrong_width, use_fallback;
+static int wide_mode;   /* 非零 = 模式字按 16 位建 ESI（模拟蓝海华腾那类驱动） */
 static int actual_eeprom_length, fallback_reads, fallback_frees;
 static int unknown_device;
 static uint16_t status_word = 0x23, read_fail_index, write_fail_index;
@@ -70,7 +72,7 @@ int GM_Master_Start(uint32_t timeout, int* interrupt) {
 int GM_Slave_Num_Get(void) { int rc = CALL(); return rc ? rc : slaves; }
 int GM_Calculate_Config_Info(Slave_info** list) { return CALL(); }
 int GM_PDO_Map_Print(Slave_info* list, uint32_t num) { return 0; }
-int GM_Master_Set_Cycle(uint32_t period) { return CALL(); }
+int GM_Master_Set_Cycle(uint32_t period) { master_cycle = period; return CALL(); }
 int GM_DC_Enable(void) { return CALL(); }
 int GM_Reg_Resource_Init(uint32_t count, uint32_t* sizes) { return CALL(); }
 int GM_Sdo_Datagram_Enable(void) { return CALL(); }
@@ -131,7 +133,10 @@ static size_t make_eeprom(unsigned char* data, int six_axis) {
                         obj->role == DEV_DICT_ROLE_TARGET_SPEED)) continue;
                     PDO_ENTRY_ITEM entry = {0};
                     entry.index = obj->index + 2048 * axis;
-                    entry.bitLen = wrong_width && obj->role == DEV_DICT_ROLE_ACTUAL_POS ? 16 : obj->bits;
+                    entry.bitLen = wrong_width && obj->role == DEV_DICT_ROLE_ACTUAL_POS ? 16
+                                 : wide_mode && (obj->role == DEV_DICT_ROLE_MODE_DISPLAY ||
+                                                 obj->role == DEV_DICT_ROLE_OP_MODE) ? 16
+                                 : obj->bits;
                     memcpy(block + length, &entry, sizeof(entry)); length += sizeof(entry);
                     ++header.entryCount;
                 }
@@ -146,6 +151,7 @@ static size_t make_eeprom(unsigned char* data, int six_axis) {
 }
 
 int GM_EEPROM_Get(int pos, unsigned char* out, size_t size, uint32_t timeout, int* interrupt) {
+    eeprom_interrupt_ptr = interrupt;
     int rc = CALL(); if (rc) return rc;
     CHECK(size >= 4096);
     size_t n = make_eeprom(out, slaves > 1);
@@ -344,8 +350,22 @@ static void lifecycle_tests(void) {
     CHECK(Master_ServoWrite(0, DEV_DICT_ROLE_TARGET_SPEED, 0) == -2);
     CHECK(ethercat_close() == 0);
     missing_optional = 0;
-    int* bad[] = {&bad_eeprom, &missing_mode, &wrong_width};
-    for (size_t i = 0; i < 3; ++i) {
+    /* 位长**不由这一层判**：master 如实把 ESI 声明的位长带出来，够不够用留给 HAL。
+     * 所以 16 位的位置或模式字都应该绑得上，而且位长原样带出。 */
+    wrong_width = 1;
+    CHECK(ethercat_init(&config) == 0);
+    CHECK(Master_ServoHasRole(0, DEV_DICT_ROLE_ACTUAL_POS));
+    CHECK(g_device_data[0].slave.act_pos.bit_length == 16);
+    CHECK(ethercat_close() == 0);
+    wrong_width = 0;
+    wide_mode = 1;
+    CHECK(ethercat_init(&config) == 0);
+    CHECK(g_device_data[0].slave.act_mode.bit_length == 16);
+    CHECK(g_device_data[0].slave.Modes_of_operation.bit_length == 16);
+    CHECK(ethercat_close() == 0);
+    wide_mode = 0;
+    int* bad[] = {&bad_eeprom, &missing_mode};
+    for (size_t i = 0; i < 2; ++i) {
         *bad[i] = 1; before = handshakes;
         CHECK(ethercat_init(&config) < 0 && handshakes == before);
         if (bad[i] == &missing_mode) CHECK(strstr(Master_StartupError(), "0x6061") != NULL);
@@ -388,8 +408,9 @@ static void servo_tests(void) {
         CHECK(Master_ServoStep(0,DS402_REQ_ENABLE,8,NULL) < 0 && write_count == 2);
         CHECK(written_index[0] == 0x607A && written_index[1] == 0x6060);
         write_count = 0; write_fail_index = 0x6040; actual_mode = 8;
-        CHECK(Master_ServoStep(0,DS402_REQ_ENABLE,8,NULL) < 0 && write_count == 1);
-        CHECK(written_value[0] == 0x0F);
+        CHECK(Master_ServoStep(0,DS402_REQ_ENABLE,8,NULL) < 0 && write_count == 2);
+        CHECK(written_index[0] == 0x607A && written_value[0] == 1234);
+        CHECK(written_index[1] == 0x6040 && written_value[1] == 0x0F);
     }
     clear_failure(); status_word = 0x23; actual_mode = 8;
     g_device_data[0].slave.act_mode.bit_length = 0;
@@ -410,7 +431,34 @@ static void servo_tests(void) {
     CHECK(Master_ServoSetModeSwitch(0,(Ds402ModeSwitch)99) < 0);
     CHECK(Master_ServoStep(0,DS402_REQ_ENABLE,99,NULL) < 0);
     CHECK(servo_reads == 0 && write_count == 0);
+    const uint16_t enabled_words[] = {0x0027, 0x0037, 0x0227, 0x0237};
+    for (unsigned i = 0; i < sizeof(enabled_words) / sizeof(enabled_words[0]); ++i) {
+        clear_failure(); status_word = enabled_words[i]; actual_mode = 8;
+        CHECK(Master_ServoStep(0, DS402_REQ_ENABLE, 8, NULL) == 0 && write_count == 0);
+        CHECK(Master_ServoStep(0, DS402_REQ_DISABLE, 8, NULL) == 0 && write_count == 1);
+        CHECK(written_index[0] == 0x6040 && written_value[0] == 7);
+        clear_failure(); actual_mode = 9;
+        CHECK(Master_ServoSetModeSwitch(0, DS402_MODESW_DISABLE_FIRST) == 0);
+        CHECK(Master_ServoStep(0, DS402_REQ_ENABLE, 8, NULL) == 0 && write_count == 1);
+        CHECK(written_index[0] == 0x6040 && written_value[0] == 7);
+    }
     CHECK(ethercat_close() == 0);
+}
+
+static void dc_config_tests(void) {
+    const uint32_t periods[] = {250, 1000, 1500, 2000};
+    for (int dc = 0; dc < 2; ++dc) for (size_t i = 0; i < 4; ++i) {
+        config.cycle_us = periods[i]; config.dc_enable = dc;
+        clear_failure(); CHECK(ethercat_init(&config) == 0);
+        CHECK(master_cycle == periods[i]);
+        CHECK(slave_list->sync_assign_activate == (dc ? 0x300u : 0u));
+        CHECK(slave_list->sync0_cycle == (dc ? periods[i] * 1000u : 0u));
+        CHECK(slave_list->sync0_shift == (dc ? periods[i] * 500u : 0u));
+        CHECK(ethercat_close() == 0);
+    }
+    config.cycle_us = UINT32_MAX; const int before = sdk_calls;
+    CHECK(ethercat_init(&config) < 0 && sdk_calls == before);
+    config.cycle_us = 1000; config.dc_enable = 1;
 }
 
 static void parser_tests(void) {
@@ -559,13 +607,39 @@ static void allocation_tests(void) {
     CHECK(succeeded);
 }
 
+/* 打断标志必须**真的接上**：不接的话，某台从站不应答 EEPROM 时要干等满 10 秒，
+ * 30 台从站最坏 300 秒，期间 Master_RequestStop() 也停不下来。
+ * 这里不模拟 SDK 的轮询，只验证「传进去的就是 Master_RequestStop 置位的那块存储」。 */
+static void interrupt_wiring_tests(void) {
+    config.cycle_us = 1000; config.dc_enable = 1;
+    eeprom_interrupt_ptr = NULL;
+    clear_failure();
+    CHECK(ethercat_init(&config) == 0);
+    CHECK(eeprom_interrupt_ptr != NULL);
+    CHECK(*eeprom_interrupt_ptr == 0);
+    Master_RequestStop();
+    CHECK(*eeprom_interrupt_ptr == 1);   /* 同一块存储：停止能打断 EEPROM 等待 */
+    CHECK(Master_StopFlag());
+    CHECK(ethercat_close() == 0);
+
+    /* 重新 init 必须把标志清回去，否则下一次启动会被「上一次的停止」立刻打断。
+     * GM_Master_Start 等桩里已有 CHECK(*interrupt == 0)，会一并验证这一点。 */
+    eeprom_interrupt_ptr = NULL;
+    clear_failure();
+    CHECK(ethercat_init(&config) == 0);
+    CHECK(eeprom_interrupt_ptr != NULL && *eeprom_interrupt_ptr == 0);
+    CHECK(ethercat_close() == 0);
+}
+
 int main(void) {
     lifecycle_tests();
     servo_tests();
+    dc_config_tests();
     parser_tests();
     io_tests();
     fallback_tests();
     allocation_tests();
+    interrupt_wiring_tests();
     printf("driver_regression: %u checks passed\n",checks);
     return 0;
 }

@@ -20,16 +20,19 @@
 
 #include <stdint.h>
 
-/* 5.0：新增 hal_io_image_size()（函数增按本文件的策略是 MAJOR）。
- * 4.0：新增故障复位与总线健康查询两个公共函数，并新增
- *      HalCConfig.fault_reset_timeout_ms 字段。 */
-#define HAL_C_ABI_MAJOR  5u
-#define HAL_C_ABI_MINOR  0u
+#define HAL_C_ABI_MAJOR  7u     /* 契约/语义版本：函数增删、返回码含义变 */
+#define HAL_C_ABI_MINOR  0u     /* 结构布局版本：字段增删改序 */
+
+/* ---- HAL 发行版本 ---- */
+#define HAL_VERSION_MAJOR  0u       /* 主版本 */
+#define HAL_VERSION_MINOR  1u       /* 次版本 */
+#define HAL_VERSION_PATCH  0u       /* 修订号 */
+#define HAL_VERSION_STRING "0.1"    /* 字符串形式，日志与上报用；须与上面三个保持一致 */
 
 #define HAL_C_MAX_DEV     30u   /* 轴 / IO / 面板 各自的容量上限 */
 #define HAL_C_MAX_SPINDLE 4u    /* 主轴容量上限（一台机床几根就够） */
-#define HAL_C_NAME_LEN    64u
-#define HAL_INVALID_ID    UINT16_MAX
+#define HAL_C_NAME_LEN    64u   /* 定长名称缓冲长度。字符串一律定长数组，不用 char*（见文件头） */
+#define HAL_INVALID_ID    UINT16_MAX  /* 无效 HalAxisId 的哨兵。0 是合法轴号，所以取最大值 */
 
 /* ---- 不透明句柄 ---- */
 typedef struct HalContext HalContext;
@@ -38,13 +41,13 @@ typedef struct HalContext HalContext;
 typedef uint16_t HalAxisId;      /* **就是逻辑轴号本身**，不是装配下标 */
 
 /* 按轴实例查询的功能。0x6FFF 报警控制尚无设备定义，因此不会宣告可用。 */
-#define HAL_FUNC_POSITION       1u
-#define HAL_FUNC_SPEED          2u
-#define HAL_FUNC_ERROR_CODE     3u
-#define HAL_FUNC_ALARM_CONTROL  4u
-#define HAL_CAP_READY           1u
-#define HAL_CAP_UNSUPPORTED     2u
-#define HAL_CAP_NOT_CONFIGURED  3u
+#define HAL_FUNC_POSITION       1u  /* 位置：0x607A 目标位置 + 0x6064 实际位置 */
+#define HAL_FUNC_SPEED          2u  /* 速度：0x60FF 目标转速 + 0x606C 实际转速（两个都要有） */
+#define HAL_FUNC_ERROR_CODE     3u  /* 故障码 0x603F */
+#define HAL_FUNC_ALARM_CONTROL  4u  /* 厂商专有报警控制 0x6FFF；当前无设备定义，恒不可用 */
+#define HAL_CAP_READY           1u  /* 该功能可用 */
+#define HAL_CAP_UNSUPPORTED     2u  /* 设备不支持、或没绑这个 PDO；reason 里写明缺什么 */
+#define HAL_CAP_NOT_CONFIGURED  3u  /* 不是设备不行，是 HAL 侧还没配这个功能 */
 
 typedef struct {
     uint32_t function;
@@ -63,11 +66,12 @@ typedef struct {
 #define HAL_WRAP_LINEAR       0   /* 线性计数 */
 #define HAL_WRAP_MODULAR      1   /* 模循环（主轴：模每转脉冲数） */
 
-/* 0 无效，必须由机床配置显式选择。 */
-#define HAL_ESTOP_DISABLE_OPERATION 1
-#define HAL_ESTOP_DISABLE_VOLTAGE   2
-#define HAL_SPINDLE_CSV 0
-#define HAL_SPINDLE_CSP 1
+/* 急停时对该轴做什么。0 无效，必须由机床配置显式选择。 */
+#define HAL_ESTOP_DISABLE_OPERATION 1   /* 只去使能：停在 SwitchedOn（写 0x07，可收指令、不带载） */
+#define HAL_ESTOP_DISABLE_VOLTAGE   2   /* 撤销电压（写 0x00，断电），最彻底 */
+/* 主轴的期望模式。下面是 HAL 自己的取值，与驱动器的 0x6060 不是一回事（映射见括号）。 */
+#define HAL_SPINDLE_CSV 0               /* 速度模式，映射到 0x6060 = 9 */
+#define HAL_SPINDLE_CSP 1               /* 位置模式，映射到 0x6060 = 8 */
 typedef int32_t HalSpindleMode;
 
 /* ============================================================================
@@ -94,21 +98,28 @@ typedef struct {
     int32_t feedback_wrap;              /* HAL_WRAP_* */
     double  command_units_per_count;    /* 命令当量（用户单位/脉冲），> 0 如确定 1 mm 对应 10000 个命令计数，就传入 command_units_per_count = 0.0001*/
     double  feedback_units_per_count;   /* 反馈当量，> 0。可与命令不同 */
-    int32_t command_invert;             /* 非零 = 命令方向取反 */
+    int32_t command_invert;             /* 非零 = 位置及主轴 CSV 转速命令方向取反 */
     int32_t feedback_invert;            /* 非零 = 反馈方向取反。**与命令分开**——
                                            外接编码器/光栅尺可能只需要翻反馈 */
     double  enc_off;                    /* 已保存的坐标偏置；旧 RT 语义：原始位置 - enc_off */
+
+    /* ---- 主轴定向（厂商专有，可选，暂定）----
+     * 定向不是标准 DS402 动作：驱动器收到一个厂商规定的控制字后自行减速并对准，
+     * 完成标志在状态字的某一位上。**值与位都是驱动器专有的**，所以由设备字典配、
+     * 不写死在 HAL 里。两个都为 0 表示该轴不支持定向——此时定向接口返回
+     * HAL_ERROR_UNSUPPORTED，不会静默当成成功。
+     * 进给轴保持 0 即可。 */
+    uint16_t vendor_orient_control_word; /* 如 0x040F */
+    uint16_t vendor_orient_done_mask;    /* 如 0x0400（状态字 bit10） */
 } HalCAxisCfg;
 
-/* 主轴 —— 在通用轴属性之上加转速侧的几个量。
- * 单独一张表，不塞进 axes[]：主轴的固有属性和进给轴不同（转速窗口、定向、
+/* 主轴 —— 在通用轴属性之上加转速上限。
+ * 单独一张表，不塞进 axes[]：主轴的固有属性和进给轴不同（定向、
  * 运行期 CSV↔CSP 切换），混在一起会把轴表越弄越脏。
  * @note axis.logical_axis **必须 >= 0** —— 主轴角度接口也用 HalAxisId 寻址。 */
 typedef struct {
     HalCAxisCfg axis;                   /* 通用属性全在这，不重复 */
     double      max_speed;              /* rpm */
-    double      accel;                  /* 预留的主轴加速度参数；当前仅校验 >= 0，不生成加减速曲线，单位未定 */
-    double      speed_window;           /* 转速到位窗口（rpm）；HAL 据此给 at_speed */
 } HalCSpindleCfg;
 
 typedef struct {
@@ -163,6 +174,14 @@ typedef struct {
                                            「可能不可信」写，将来真值出现时不用改。 */
     double   actual_pos;                /* 用户单位 */
     double   command_pos;               /* 用户单位 */
+    double   actual_speed;              /* 实际速度。单位是驱动器速度对象（0x606C）的单位，
+                                           HAL **不做任何换算**——口径见 hal_context.c
+                                           采样处那段说明。speed_valid 为 0 时它恒为 0，
+                                           此时"0"表示**不可得**，不是"静止"。 */
+    int32_t  speed_valid;               /* 非零 = 该轴映射了速度 PDO（0x606C 与 0x60FF
+                                           都是 32 位），actual_speed 才有意义。
+                                           主轴上恒为 1——HAL 在 bind 阶段就拒绝
+                                           没有速度 PDO 的主轴。 */
     uint16_t raw_status;                /* 原始状态字 0x6041，诊断用 */
     uint16_t error_code;                /* 驱动器故障码 0x603F */
     int32_t  error_code_valid;          /* 0x603F 未映射时为 0，error_code 此时无效 */
@@ -170,7 +189,6 @@ typedef struct {
 
 typedef struct {
     int32_t  enabled;
-    int32_t  at_speed;                  /* 非零 = |指令 - 实际| <= 转速窗口 */
     int32_t  mode;                      /* HAL_SPINDLE_CSV / _CSP，来自 0x6061 */
     double   command_speed;             /* rpm，带符号：正=正转 M03，负=反转 M04 */
     double   actual_speed;

@@ -8,25 +8,8 @@
 #include "/opt/GreeMaster/include/libGREEMASTER/GreeMasterAPI.h"
 #include "/opt/GreeMaster/include/libGREEMASTER/gm_errcode.h"
 
-// ===============错误检查宏=================
-#define CHECK_RC(rc,info,label) \
-    do { \
-        if ((rc) != 0) { \
-            printf("%s,rc = %d\n", info,rc); \
-            goto label; \
-        } \
-    } while(0)
-#define CHECK_FUNC(func) do { \
-    int ret = (func); \
-    if (ret < 0) { \
-        fprintf(stderr, "Error in function: %s, rc = %d\n", #func, ret); \
-    } \
-} while (0)
-
-#define SYNC0_CYCLE 1000000   
-#define SYNC0_SHIFT 500000                  
-#define SYNC1_CYCLE 0                
-#define SYNC1_SHIFT 0 
+/* 错误检查宏不在这里：本层在 main_demo.c 里按「各阶段共用一份启动预算」的需要
+ * 重定义了 CHECK_RC。device.h 旧版那个与它语义不同、且全仓库无人使用，已删除。 */
 
 typedef struct{
    int slave_pos;
@@ -53,7 +36,7 @@ typedef struct{
 // 紧凑结构体 (禁止填充)
 typedef struct {
     unsigned short int type;      // 数据类型 (Word 1)
-    unsigned short int length;    // 数据内容长度 (Word 2)，注意：此值通常代表**字节数**
+    unsigned short int length;    // 数据内容长度 (Word 2)。**单位是 Word，不是字节**：字节数 = 该值 × 2
 } ECAT_EEPROM_CLASS_HEADER;
 
 // 1. PDO 头部结构
@@ -186,7 +169,8 @@ void device_reset(void);
 /* 某台从站的 EEPROM 身份（按【从站号】索引）。越界返回一个全零的静态对象。 */
 const DEVICE_BASIC_INFO* device_identity_get(int slave_pos);
 
-int get_device_info_from_eeprom(int slave_num, DEVICE_TYPE* types);
+int get_device_info_from_eeprom(int slave_num, DEVICE_TYPE* types,
+                              uint32_t cycle_us, int dc_enable);
 int device_match(Slave_info* list, DEVICE_TYPE* type, int slave_num);
 const char* device_bind_error(void);
 #endif

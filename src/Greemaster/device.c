@@ -1,4 +1,5 @@
 #include "device.h"
+#include "main_demo.h"
 #include "slave_list.h"
 #include "common/devdict.h"
 
@@ -282,7 +283,7 @@ int build_chain_from_raw_data(Slave_info** slave_ptr,
 }
 
 static int COERequestResult(const DEVICE_BASIC_INFO* info, const unsigned char* data,
-                            int slave_pos, size_t bytes) {
+                            int slave_pos, size_t bytes, uint32_t cycle_us, int dc_enable) {
     const int slots = device_slot_count((DEVICE_TYPE)info->type);
     if (position < 0 || slots > MAX_DEVICE_NUM - position) return -1;
     int have_tx = 0, have_rx = 0;
@@ -292,9 +293,8 @@ static int COERequestResult(const DEVICE_BASIC_INFO* info, const unsigned char* 
         return -1;
 
     if (!have_tx || !have_rx) {
-        int interrupt = 0;
-        Slave_info* fallback = GM_PDO_Map_Get(slave_pos, 10, &interrupt);
-        if (!fallback) return -1;
+        Slave_info* fallback = GM_PDO_Map_Get(slave_pos, 10, Master_InterruptFlag());
+        if (!fallback || Master_Interrupted()) return -1;
         const int rc = extract_pdos(fallback, 0x1c13, &tx) ||
                        extract_pdos(fallback, 0x1c12, &rx);
         for (const sm_info* sm = fallback->sm_list; sm; sm = sm->next) {
@@ -317,11 +317,15 @@ static int COERequestResult(const DEVICE_BASIC_INFO* info, const unsigned char* 
     if (!slave) return -1;
     slave->Vendorid = info->ID;
     slave->ProductCode = info->CODE;
-    slave->sync_assign_activate = 0x300; // TODO 某些io面板不支持DC，暂时写死0x300，后续可根据设备类型判断
-    slave->sync0_cycle = SYNC0_CYCLE;
-    slave->sync0_shift = SYNC0_SHIFT;
-    slave->sync1_cycle = SYNC1_CYCLE;
-    slave->sync1_shift = SYNC1_SHIFT;
+    /* SDK 映射使用 ns；保持原有半周期相移策略，周期来自调用方配置。
+     * dc_enable 是整条总线的开关；逐设备 DC 支持能力仍须现场核对。
+     * 保留旧 activate=0x300；SYNC1 字段为 0 不等于关闭 SYNC1。
+     * 是否应只启用 SYNC0（0x100）须结合 SDK/设备手册及上机结果确认。 */
+    slave->sync_assign_activate = dc_enable ? 0x300u : 0u;
+    slave->sync0_cycle = dc_enable ? cycle_us * 1000u : 0u;
+    slave->sync0_shift = dc_enable ? cycle_us * 500u : 0u;
+    slave->sync1_cycle = 0;
+    slave->sync1_shift = 0;
     slave->slave_total = info->slave_total;
     slave->sm_num = (tx.count != 0) + (rx.count != 0);
     slave->slave_len = tx_bits + rx_bits;
@@ -336,7 +340,11 @@ static int COERequestResult(const DEVICE_BASIC_INFO* info, const unsigned char* 
 
 /* DS402 标准对象号 —— profile="ds402" 时用它；字典里不写 objects。
  * 这组值对应原硬编码的 6 个 Tx + 4 个 Rx 请求，行为等价。
- * 注意原实现没有绑 target_torque（0x6071），这里也不绑。 */
+ * 注意原实现没有绑 target_torque（0x6071），这里也不绑。
+ *
+ * 末列 bits 是**期望值，不是硬约束**：绑定以设备 ESI 实际声明的位长为准（见 find_object），
+ * 这里只在绑不上时用于报错文案。原因：同一族 DS402 驱动器对 0x6060/0x6061 的声明可能是
+ * 8 位也可能是 16 位（如蓝海华腾），一张全局表服务不了两种。够不够用由 HAL 判。 */
 static const DevDictObject kDs402Std[] = {
     {DEV_DICT_ROLE_STATUS_WORD,   0x6041, 0x00, 16, 1},
     {DEV_DICT_ROLE_ACTUAL_POS,    0x6064, 0x00, 32, 1},
@@ -384,6 +392,9 @@ static RxEntry_Unit* rx_role(slave_addr* axis, DevDictRole role) {
     }
 }
 
+/* 认领一个角色。**位长不跟声明的值比**——句柄带回来的就是 ESI 的实际位长，
+ * 够不够用由 HAL 判（理由见 kDs402Std 上面那段）。这里只挡"物理读不进来"的宽度：
+ * Master_ServoRead 最多按 4 字节读，所以 0 位或 >32 位的 Entry 直接拒。 */
 static int bind_servo_role(Slave_info* list, uint32_t slave_pos, uint32_t slot,
                            const DevDictObject* object, uint32_t pdo, uint32_t entry,
                            int by_index) {
@@ -396,7 +407,7 @@ static int bind_servo_role(Slave_info* list, uint32_t slave_pos, uint32_t slot,
         int rc = by_index
             ? GM_TxPdoEntry_Get_By_Index(&handle, list, slave_pos, pdo, object->index, object->sub)
             : GM_TxPdoEntry_Get_By_Pos(&handle, list, slave_pos, pdo, entry);
-        if (rc != 0 || handle.bit_length != object->bits) return -1;
+        if (rc != 0 || handle.bit_length == 0 || handle.bit_length > 32) return -1;
         *dst = handle;
     } else {
         RxEntry_Unit* dst = rx_role(axis, object->role);
@@ -405,7 +416,7 @@ static int bind_servo_role(Slave_info* list, uint32_t slave_pos, uint32_t slot,
         int rc = by_index
             ? GM_RxPdoEntry_Get_By_Index(&handle, list, slave_pos, pdo, object->index, object->sub)
             : GM_RxPdoEntry_Get_By_Pos(&handle, list, slave_pos, pdo, entry);
-        if (rc != 0 || handle.bit_length != object->bits) return -1;
+        if (rc != 0 || handle.bit_length == 0 || handle.bit_length > 32) return -1;
         *dst = handle;
     }
     return 0;
@@ -429,7 +440,9 @@ static int find_object(const Slave_info* slave, const DevDictObject* object,
                  entry = entry->next, ++entry_index) {
                 if (entry->pdo_entry_index != object->index ||
                     entry->pdo_entry_subindex != object->sub) continue;
-                if (found || entry->pdo_entry_bit_length != object->bits) return -1;
+                /* 只按对象号 + 子索引匹配，位长以 ESI 为准（理由见 kDs402Std 上面那段）。
+                 * 同一对象在 ESI 里出现两次仍然算错，照旧拒掉。 */
+                if (found) return -1;
                 *pdo_pos = pdo_index;
                 *entry_pos = entry_index;
                 found = 1;
@@ -473,10 +486,13 @@ int servo_addr_config(Slave_info* list, uint32_t slave_pos, uint32_t slot) {
         if (bind_servo_role(list, slave_pos, slot, &objects[i], pdo, entry, 0) != 0)
             return -1;
     }
+    /* 只查六个必需角色**在不在**（绑上了位长就非 0）。位长够不够不在这里判——
+     * 那是 HAL 的事：只有它知道自己的读写代码能吃多宽，而且它已经有一套分角色的判据
+     * （位置类必须 32 位，其余不窄于语义宽度）。这一层如实反映 ESI 说了什么。 */
     const slave_addr* h = &g_device_data[slot].slave;
-    if (h->statusWord.bit_length != 16 || h->act_pos.bit_length != 32 ||
-        h->act_mode.bit_length != 8 || h->Control_word.bit_length != 16 ||
-        h->target_pos.bit_length != 32 || h->Modes_of_operation.bit_length != 8) {
+    if (!h->statusWord.bit_length || !h->act_pos.bit_length || !h->act_mode.bit_length ||
+        !h->Control_word.bit_length || !h->target_pos.bit_length ||
+        !h->Modes_of_operation.bit_length) {
         snprintf(g_bind_error, sizeof(g_bind_error),
                  "从站 %u 槽 %u 缺少必需 DS402 角色", slave_pos, slot);
         return -1;
@@ -569,8 +585,20 @@ int device_match(Slave_info* list, DEVICE_TYPE* types, int slave_num) {
         case SERVO_TYPE: rc = servo_addr_config(list, i, slot); break;
         case GREE_AXIS6_TYPE: rc = servo_addr_axis6_config(list, slot, i); break;
         case GREE_AXIS4_TYPE: rc = servo_addr_axis4_config(list, slot, i); break;
-        case CONTROL_PANEL_TYPE: rc = bind_io(list, i, slot, 1); break;
-        case IO_MODEL_TYPE: rc = bind_io(list, i, slot, 0); break;
+        case CONTROL_PANEL_TYPE:
+            rc = bind_io(list, i, slot, 1);
+            /* IO/面板装配失败原先只落到 main_demo 的通用文案，现场看不出是哪台、
+             * 哪个方向、第几个 Entry。这里补上从站与槽号。 */
+            if (rc != 0 && !g_bind_error[0])
+                snprintf(g_bind_error, sizeof(g_bind_error),
+                         "从站 %d 槽 %d 的操作面板 PDO 装配失败（查 Entry 位宽与顺序）", i, slot);
+            break;
+        case IO_MODEL_TYPE:
+            rc = bind_io(list, i, slot, 0);
+            if (rc != 0 && !g_bind_error[0])
+                snprintf(g_bind_error, sizeof(g_bind_error),
+                         "从站 %d 槽 %d 的 IO 模块 PDO 装配失败（查 Entry 位宽与顺序）", i, slot);
+            break;
         default: break;
         }
         if (rc != 0) {
@@ -593,15 +621,19 @@ static uint32_t read_u32_le(const unsigned char* p) {
            ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
-int get_device_info_from_eeprom(int slave_num, DEVICE_TYPE* types) {
+int get_device_info_from_eeprom(int slave_num, DEVICE_TYPE* types,
+                              uint32_t cycle_us, int dc_enable) {
     if (slave_num < 0 || slave_num > MAX_DEVICE_NUM || (slave_num && !types)) return -1;
+    if (cycle_us < 250u || cycle_us > UINT32_MAX / 1000u ||
+        (dc_enable != 0 && dc_enable != 1)) return -1;
     device_reset();
     const size_t buffer_size = 4 * 1024 * 1024;
     for (int i = 0; i < slave_num; ++i) {
         unsigned char* memory = calloc(buffer_size, 1);
         if (!memory) return -1;
-        int interrupt = 0;
-        int rc = GM_EEPROM_Get(i, memory, buffer_size, 10, &interrupt);
+        /* 接真正的打断标志：否则从站不应答时要干等满 10 秒。 */
+        int rc = GM_EEPROM_Get(i, memory, buffer_size, 10, Master_InterruptFlag());
+        if (Master_Interrupted()) { free(memory); return -1; }
         if (rc > 0 && (size_t)rc <= buffer_size) {
             const size_t actual_bytes = (size_t)rc;
             if (actual_bytes < WORD_TO_BYTES(EEPROM_FIXED_WORDS)) {
@@ -618,7 +650,7 @@ int get_device_info_from_eeprom(int slave_num, DEVICE_TYPE* types) {
             types[i] = get_device_types_from_info(&info);
             info.type = types[i];
             g_slave_identity[i] = info;
-            rc = COERequestResult(&info, memory, i, actual_bytes);
+            rc = COERequestResult(&info, memory, i, actual_bytes, cycle_us, dc_enable);
         } else {
             rc = -1;
         }
