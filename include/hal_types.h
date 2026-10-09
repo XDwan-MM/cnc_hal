@@ -30,6 +30,15 @@
 #define HAL_C_ABI_MAJOR  6u
 #define HAL_C_ABI_MINOR  0u
 
+/* ---- HAL 发行版本 ----
+ * **和上面的 ABI 版本是两回事**：ABI 管"二进制能不能对上号"，一改就得 HAL 库、
+ * RT、固件包一起升级；发行版本是这批代码对外叫什么，改它不影响编译期闸门，
+ * 所以这里只给宏、不加查询函数（加函数按本文件的策略就是 MAJOR 变更）。 */
+#define HAL_VERSION_MAJOR  0u
+#define HAL_VERSION_MINOR  1u
+#define HAL_VERSION_PATCH  0u
+#define HAL_VERSION_STRING "0.1"
+
 #define HAL_C_MAX_DEV     30u   /* 轴 / IO / 面板 各自的容量上限 */
 #define HAL_C_MAX_SPINDLE 4u    /* 主轴容量上限（一台机床几根就够） */
 #define HAL_C_NAME_LEN    64u
