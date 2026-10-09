@@ -1,29 +1,30 @@
 #pragma once
 #include "hal_types.h"
 
-#define HAL_OK                0
-#define HAL_ERROR_ARGUMENT    0x0009
-#define HAL_ERROR_ABI         0x000A
-#define HAL_ERROR_CONFIG      0x0007
-#define HAL_ERROR_NOT_RUNNING 0x0003
-#define HAL_ERROR_STOPPED     0x000B
-#define HAL_ERROR_BUS         0x0101
-#define HAL_ERROR_BUSY        0x0008
-#define HAL_ERROR_STATE       0x0001
-#define HAL_ERROR_MEMORY      0x000C
-#define HAL_ERROR_TIMEOUT     0x0104
-#define HAL_ERROR_UNSUPPORTED 0x0105
+/* 非零即失败。0x01xx 那几个是运行期/总线类，其余是调用与配置类。 */
+#define HAL_OK                0       /* 成功 */
+#define HAL_ERROR_ARGUMENT    0x0009  /* 参数无效：context 为空、轴号不存在、入参越界或非有限值 */
+#define HAL_ERROR_ABI         0x000A  /* ABI 不匹配：abi_major/minor、struct_size 或 reserved 与头文件不符 */
+#define HAL_ERROR_CONFIG      0x0007  /* 配置无效：静态校验不过，或设备/PDO 绑定失败 */
+#define HAL_ERROR_NOT_RUNNING 0x0003  /* 尚未就绪：没 start、没 begin，或该操作要求的运行状态还没达成 */
+#define HAL_ERROR_STOPPED     0x000B  /* 已 request_stop，或阻塞等待被主动停止打断。请求之后仍须走 stop/destroy */
+#define HAL_ERROR_BUS         0x0101  /* 总线或主站失败。运行期首个错误码被闭锁，此后周期调用持续返回它，直到 stop/start */
+#define HAL_ERROR_BUSY        0x0008  /* 主站已被占用：本进程已有活着的 context（一个主站不能开两个） */
+#define HAL_ERROR_STATE       0x0001  /* 调用顺序错误，phase 不对：write_* 要在 begin 与 commit 之间；wait 要求上一拍已 commit */
+#define HAL_ERROR_MEMORY      0x000C  /* 内存分配失败（context 或内部缓冲） */
+#define HAL_ERROR_TIMEOUT     0x0104  /* 启动总预算耗尽：等主站/状态机就位超时 */
+#define HAL_ERROR_UNSUPPORTED 0x0105  /* 设备不支持该功能：PDO 没绑、定向没配。**不静默当成功** */
 /* 轴的实时状态没到位。以前这些情况一律回 NOT_RUNNING，上层分不出"没使能"
  * 和"模式还没切过来"——而这两件事的处理方式完全不同（一个要等使能，一个要等模式）。 */
-#define HAL_ERROR_NOT_ENABLED   0x0106
-#define HAL_ERROR_MODE_MISMATCH 0x0107
+#define HAL_ERROR_NOT_ENABLED   0x0106  /* 轴尚未使能，或状态机还没到位。写指令被拒，等使能/等状态机 */
+#define HAL_ERROR_MODE_MISMATCH 0x0107  /* 运行模式未到位：实际或期望模式不是该指令要求的 CSP（写位置）或 CSV（写转速） */
 
-/* hal_rt_axis_readiness 的位。用宏不用 enum，与文件内其它取值同一条规矩。 */
-#define HAL_READY_PHASE        0x01u  /* 不在 begin 与 commit 之间 */
+/* hal_rt_axis_readiness 的位。用宏不用 enum，与文件内其它取值同一条规矩。
+ * 全 0 = 就绪；判据与 write_pos / write_speed 的受理条件对齐，实现在 hal_context.c。 */
+#define HAL_READY_PHASE        0x01u  /* 不在 begin 与 commit 之间（调用时机错） */
 #define HAL_READY_NOT_ENABLED  0x02u  /* 尚未到 OperationEnabled */
 #define HAL_READY_NOT_READY    0x04u  /* 状态机或采样未到位 */
-/* 驱动器实际模式（0x6061）还没跟上 HAL 要求的模式——切换还没生效。 */
-#define HAL_READY_MODE_ACTUAL  0x10u
+#define HAL_READY_MODE_ACTUAL  0x10u  /* 驱动器实际模式（0x6061）还没跟上 HAL 要求的模式——切换还没生效 */
 /* 0x08 原来是 MODE_DESIRED（"目标模式与配置的工作模式不一致"）。那条判据把
  * "正常切模式"当成了"没就绪"：主轴配置是速度模式，M29/攻丝切到位置模式后它永远为真，
  * 而此刻 write_pos 其实是受理的 —— 与受理条件矛盾，已删。
