@@ -1174,15 +1174,24 @@ static void axis_readiness(void) {
     }
     CHECK(r == 0);
 
-    /* 主轴：配置的工作模式是速度（CSV）。一旦被请求切到位置（CSP），
-     * 模式两位就置起来了 —— 注意这是相对**配置工作模式**的差距，不是相对
-     * "本次请求"。此刻 hal_rt_axis_write_pos 其实是**受理**的，两者判据不一致
-     * （见 HANDOFF 第十一节，未定论，用例先如实记录现状）。 */
+    /* 主轴：配置的是速度模式。请求切到位置模式后，在驱动器 0x6061 跟上来之前
+     * MODE_ACTUAL 置位（"切换还没生效"）；跟上之后全 0 —— 这时 write_pos 才受理。
+     * 这就是"先 request_mode、等全 0、再下发"那条用法。 */
     begin(c);   /* 必须在窗口里：上面循环最后一次已经 commit 了 */
     CHECK(hal_rt_spindle_request_mode(c, 3, HAL_SPINDLE_CSP) == 0);
+    CHECK(hal_rt_spindle_enable(c, 3, 1) == 0);
     CHECK(hal_rt_axis_readiness(c, 3, &r) == 0);
-    CHECK(r & (HAL_READY_MODE_DESIRED | HAL_READY_MODE_ACTUAL));
+    CHECK(r & HAL_READY_MODE_ACTUAL);
     CHECK(hal_rt_commit_cycle(c) == 0);
+
+    for (int i = 0; i < 20; ++i) {
+        cycle(c);
+        begin(c);
+        CHECK(hal_rt_axis_readiness(c, 3, &r) == 0);
+        CHECK(hal_rt_commit_cycle(c) == 0);
+        if (r == 0) break;
+    }
+    CHECK(r == 0);
 
     /* 轴不存在 / 出参为空 */
     CHECK(hal_rt_axis_readiness(c, 99, &r) == HAL_ERROR_ARGUMENT);

@@ -306,13 +306,17 @@ int32_t hal_rt_spindle_release_orient(HalContext* c, HalAxisId id);
  * 那两个接口把「没使能」「模式没到位」都折进一个返回码，上层分不清该等什么。
  *
  * 各位的含义（=1 表示该项不满足）：
- *   bit0 PHASE      不在 begin 与 commit 之间（调用时机错）
+ *   bit0 PHASE       不在 begin 与 commit 之间（调用时机错）
  *   bit1 NOT_ENABLED 尚未到 OperationEnabled
  *   bit2 NOT_READY   状态机或采样还没到位
- *   bit3 MODE_DESIRED 请求的目标模式与 HAL 记录的不一致（切换还没发起完）
- *   bit4 MODE_ACTUAL  驱动器实际模式（0x6061）与目标不一致（切换还没生效）
+ *   bit4 MODE_ACTUAL 驱动器实际模式（0x6061）还没跟上 HAL 要求的模式（切换还没生效）
  *
- * 全 0 = 可以受理。**正常追赶模式切换时会短暂非零，不是故障**——只有持续非零才要处置。
+ * 全 0 = 就绪。**正常追赶模式切换时会短暂非零，不是故障**——只有持续非零才要处置。
+ *
+ * @note **这里不管你要写的是哪条指令。** HAL 要求的模式由
+ *       hal_rt_spindle_request_mode() 设定（默认取配置的工作模式），本查询只比
+ *       「实际 vs 要求」。而 write_pos 要 CSP、write_speed 要 CSV，所以顺序应该是：
+ *       先 request_mode 把期望模式设对 → 等本查询全 0 → 再下发。
  *
  * @param c   已 start 的 context
  * @param id  逻辑轴号

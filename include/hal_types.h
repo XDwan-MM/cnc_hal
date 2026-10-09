@@ -26,7 +26,12 @@
  *        （"到速"是上层 M 代码的握手判据，而且上层自己又算了一遍）。
  *        删字段按本文件的策略是 MINOR。
  *      - hal_rt_spindle_release_orient() 不再替上层把轴重新使能：释放后要不要
- *        上力矩由 hal_rt_axis_enable() 表达。这条是语义变更，所以本版按 MAJOR 记。
+ *        上力矩由 hal_rt_axis_enable() 表达。
+ *      - hal_rt_axis_readiness() 的 HAL_READY_MODE_* 口径改对：原来拿**配置的
+ *        work_mode**当目标模式比，主轴为 M29/攻丝切到位置模式后会永远报"没就绪"，
+ *        与 write_pos 的受理条件矛盾。现在只比「驱动器实际模式 vs HAL 要求的模式」，
+ *        HAL_READY_MODE_DESIRED 删除（0x08 位留空不复用）。
+ *      以上两条都是语义变更，所以本版按 MAJOR 记。
  *
  *      **函数一个没删。** 主轴专用入口（spindle_enable / spindle_estop /
  *      spindle_write_pos / spindle_read_speed / axis_read_pos …）是与 RT 侧约定好的

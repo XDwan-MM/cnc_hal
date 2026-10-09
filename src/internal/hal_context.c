@@ -919,20 +919,22 @@ int32_t hal_rt_spindle_write_speed(HalContext* c, HalAxisId id, double rpm, int3
 }
 
 /* ---- 读写就绪诊断 ----
- * 单点定义"什么才算能被受理"，write_pos / write_speed 与本查询共用，
- * 避免两处条件漂移后"报错说就绪、实际拒收"。 */
+ * 只读回答"HAL 侧还差什么才能受理运动指令"，判据与 write_pos / write_speed 的
+ * 受理条件对齐：窗口内 + 已使能 + 状态机到位 + **实际模式跟上 HAL 要求的模式**。
+ *
+ * **不含"你要写哪条指令"这一维**：write_pos 要 CSP、write_speed 要 CSV，而这里只比
+ * "实际模式 vs HAL 记录的期望模式"。所以正确的调用顺序是：先
+ * hal_rt_spindle_request_mode() 把期望模式设对，等本查询全 0，再下发。
+ *
+ * 早先的实现拿**配置的 work_mode** 当"目标模式"比，于是主轴（配置是速度模式）
+ * 一旦为了 M29/攻丝切到位置模式，它就永远报"没就绪"——而那时 write_pos 明明是受理的。 */
 uint32_t axis_readiness_bits(const HalContext* c, const Axis* a) {
     uint32_t r = 0;
     if (!c || !a) return HAL_READY_PHASE;
-    /* 配置要求的模式：work_mode 是位置还是速度，决定应该是 CSP 还是 CSV。
-     * 别的函数直接拿常量比（如 hal_rt_axis_write_pos 比 CSP），这里按配置推，
-     * 两根轴的要求不同时也能给对。 */
-    const int want = a->cfg.work_mode == HAL_WORK_POSITION ? DS402_MODE_CSP : DS402_MODE_CSV;
     if (c->phase != 2)              r |= HAL_READY_PHASE;
     if (!a->status.enabled)         r |= HAL_READY_NOT_ENABLED;
     if (!a->motion_ready)           r |= HAL_READY_NOT_READY;
-    if (a->desired_mode != want)    r |= HAL_READY_MODE_DESIRED;
-    if (a->mode != want)            r |= HAL_READY_MODE_ACTUAL;
+    if (a->mode != a->desired_mode) r |= HAL_READY_MODE_ACTUAL;
     return r;
 }
 

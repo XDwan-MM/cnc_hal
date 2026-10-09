@@ -22,8 +22,12 @@
 #define HAL_READY_PHASE        0x01u  /* 不在 begin 与 commit 之间 */
 #define HAL_READY_NOT_ENABLED  0x02u  /* 尚未到 OperationEnabled */
 #define HAL_READY_NOT_READY    0x04u  /* 状态机或采样未到位 */
-#define HAL_READY_MODE_DESIRED 0x08u  /* 目标模式与 HAL 记录不一致 */
-#define HAL_READY_MODE_ACTUAL  0x10u  /* 驱动器实际模式与目标不一致 */
+/* 驱动器实际模式（0x6061）还没跟上 HAL 要求的模式——切换还没生效。 */
+#define HAL_READY_MODE_ACTUAL  0x10u
+/* 0x08 原来是 MODE_DESIRED（"目标模式与配置的工作模式不一致"）。那条判据把
+ * "正常切模式"当成了"没就绪"：主轴配置是速度模式，M29/攻丝切到位置模式后它永远为真，
+ * 而此刻 write_pos 其实是受理的 —— 与受理条件矛盾，已删。
+ * 位号**留空不复用**，免得旧代码读到的 0x08 被当成别的意思。 */
 
 /* 故障复位进展（hal_rt_axis_fault_reset_state 的出参）。
  * 用宏不用 enum：C 的 enum 底层宽度由实现定义，不适合跨 ABI（与 hal_types.h 同一条规矩）。 */
