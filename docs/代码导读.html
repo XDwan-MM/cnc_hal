@@ -170,9 +170,10 @@
 
 <hr>
 
-<h2 id="headers">2 · 四个公共头</h2>
+<h2 id="headers">2 · 公共头</h2>
 
-<p>HAL 的<strong>全部</strong>对外能力就在这四个文件里。先读它们，别急着进 <code>.c</code>。</p>
+<p>HAL 的<strong>全部</strong>对外能力就在这几个文件里（<code>hal_c_api.h</code> 只是聚合头，
+业务代码 include 它一个就够）。先读它们，别急着进 <code>.c</code>。</p>
 
 <pre class="tree">include/
 ├── hal_types.h         配置与状态的数据结构（最重要，先读它）
@@ -185,8 +186,14 @@
 
 <p>打开它，你会先看到一段关于<strong>版本闸门</strong>的说明。这是整个 ABI 的地基：</p>
 
+<div class="card warn">
+<p><b>时效</b>：本文写于 ABI 5.0 时期，数字已更新到 <b>ABI 7.0</b>（2026-10-09）。
+但代码一直在动 —— <b>碰到具体函数签名、字段、返回码，一律以 <code>include/</code> 和
+<code>docs/api-reference.md</code> 为准</b>，本文只负责把结构讲清楚。</p>
+</div>
+
 <span class="loc">include/hal_types.h</span>
-<pre><code>#define HAL_C_ABI_MAJOR  5u
+<pre><code>#define HAL_C_ABI_MAJOR  7u
 #define HAL_C_ABI_MINOR  0u
 
 typedef struct {
@@ -910,6 +917,12 @@ hal_rt_axis_fault_reset(ctx, id)
 </div>
 
 <hr>
+
+<div class="card why">
+<p><b>怎么读、按什么顺序读、每段该能回答什么问题</b> —— 见
+<a href="阅读路线图.md">阅读路线图.md</a>（按 12 小时排的阅读计划）。
+本文负责"结构是什么"，路线图负责"怎么把它读完"。</p>
+</div>
 
 <h2 id="run">13 · 怎么跑起来看</h2>
 
