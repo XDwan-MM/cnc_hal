@@ -20,14 +20,23 @@
 
 #include <stdint.h>
 
-/* 6.0：新增主轴定向三个函数 + HalCAxisCfg 的 vendor_orient_control_word /
+/* 7.0：删掉几处**不属于 HAL 职责**或纯转发的东西。
+ *      - hal_rt_spindle_write_pos：单圈刻度 + "按符号补一圈"是主轴定位的机床语义，
+ *        归上层；通用目标位置已经由 hal_rt_axis_write_pos 表达（它本来也收主轴）。
+ *      - hal_rt_spindle_enable / hal_rt_spindle_estop / hal_rt_axis_read_pos /
+ *        hal_rt_spindle_read_speed：都是 hal_rt_axis_* / read_status 的纯转发，
+ *        留着让人以为有两条路。轴状态与主轴状态里本来就有位置和转速。
+ *      - HalCSpindleCfg.accel（HAL 不生成加减速曲线，纯占位）、speed_window、
+ *        HalCSpindleStatus.at_speed（"到速"是上层 M 代码握手判据，且上层自己算）。
+ *      删函数按本文件的策略是 MAJOR。
+ * 6.0：新增主轴定向三个函数 + HalCAxisCfg 的 vendor_orient_control_word /
  *      vendor_orient_done_mask 两个字段。函数增按本文件的策略是 MAJOR。
  * 5.1：HalCAxisStatus 增 actual_speed / speed_valid —— 进给轴也要能读到实际速度。
  *      只加字段、不加函数，按本文件的策略是 MINOR。
  * 5.0：新增 hal_io_image_size()（函数增按本文件的策略是 MAJOR）。
  * 4.0：新增故障复位与总线健康查询两个公共函数，并新增
  *      HalCConfig.fault_reset_timeout_ms 字段。 */
-#define HAL_C_ABI_MAJOR  6u
+#define HAL_C_ABI_MAJOR  7u
 #define HAL_C_ABI_MINOR  0u
 
 /* ---- HAL 发行版本 ----
@@ -122,15 +131,13 @@ typedef struct {
     uint16_t vendor_orient_done_mask;    /* 如 0x0400（状态字 bit10） */
 } HalCAxisCfg;
 
-/* 主轴 —— 在通用轴属性之上加转速侧的几个量。
- * 单独一张表，不塞进 axes[]：主轴的固有属性和进给轴不同（转速窗口、定向、
+/* 主轴 —— 在通用轴属性之上加转速侧的量。
+ * 单独一张表，不塞进 axes[]：主轴的固有属性和进给轴不同（定向、
  * 运行期 CSV↔CSP 切换），混在一起会把轴表越弄越脏。
  * @note axis.logical_axis **必须 >= 0** —— 主轴角度接口也用 HalAxisId 寻址。 */
 typedef struct {
     HalCAxisCfg axis;                   /* 通用属性全在这，不重复 */
     double      max_speed;              /* rpm */
-    double      accel;                  /* 预留的主轴加速度参数；当前仅校验 >= 0，不生成加减速曲线，单位未定 */
-    double      speed_window;           /* 转速到位窗口（rpm）；HAL 据此给 at_speed */
 } HalCSpindleCfg;
 
 typedef struct {
@@ -200,7 +207,6 @@ typedef struct {
 
 typedef struct {
     int32_t  enabled;
-    int32_t  at_speed;                  /* 非零 = |指令 - 实际| <= 转速窗口 */
     int32_t  mode;                      /* HAL_SPINDLE_CSV / _CSP，来自 0x6061 */
     double   command_speed;             /* rpm，带符号：正=正转 M03，负=反转 M04 */
     double   actual_speed;

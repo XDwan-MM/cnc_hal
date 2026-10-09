@@ -64,7 +64,7 @@ static void stop_intent(Runner* r) {
     }
     for (int i = 0; i < r->cfg->spindle_count; ++i) {
         int logical = r->cfg->spindles[i].axis.logical_axis;
-        (void)hal_rt_spindle_estop(r->ctx, (HalAxisId)logical);
+        (void)hal_rt_axis_estop(r->ctx, (HalAxisId)logical);
     }
 }
 
@@ -175,9 +175,9 @@ static int print_snapshot(Runner* r) {
             HalCSpindleStatus s;
             if (call("hal_rt_spindle_read_status",
                      hal_rt_spindle_read_status(r->ctx, (HalAxisId)logical, &s))) return -1;
-            printf("CYCLE %u SPINDLE %d mode=%d actual_rpm=%.6f command_rpm=%.6f at_speed=%d angle=%.6f\n",
+            printf("CYCLE %u SPINDLE %d mode=%d actual_rpm=%.6f command_rpm=%.6f angle=%.6f\n",
                    r->cycle, logical, s.mode, s.actual_speed, s.command_speed,
-                   s.at_speed, s.position_deg);
+                   s.position_deg);
         }
     }
     uint32_t len = r->settings->x_len;
@@ -428,7 +428,7 @@ static int spindle_snapshot(Runner* r, HalCSpindleStatus* state) {
 static int spindle_write_speed_tick(Runner* r, double rpm, int dir) {
     if (begin_tick(r)) return -1;
     int rc = hal_rt_spindle_write_speed(r->ctx, spindle_axis(r), rpm, dir);
-    if (rc) (void)hal_rt_spindle_estop(r->ctx, spindle_axis(r));
+    if (rc) (void)hal_rt_axis_estop(r->ctx, spindle_axis(r));
     int committed = end_tick(r);
     return call("hal_rt_spindle_write_speed", rc) || committed ? -1 : 0;
 }
@@ -445,7 +445,7 @@ static int spindle_speed_case(Runner* r, int dir) {
                "确认主轴反转方向、低速值、外部测速与实体停机手段")) return -1;
     if (call("spindle mode CSV",
              hal_rt_spindle_request_mode(r->ctx, spindle_axis(r), HAL_SPINDLE_CSV)) ||
-        call("spindle enable", hal_rt_spindle_enable(r->ctx, spindle_axis(r), 1))) return -1;
+        call("spindle enable", hal_rt_axis_enable(r->ctx, spindle_axis(r), 1))) return -1;
     HalCSpindleStatus state;
     int ready = 0;
     for (unsigned i = 0; i < r->settings->settle_cycles; ++i) {
@@ -465,8 +465,8 @@ static int spindle_speed_case(Runner* r, int dir) {
     ready = 0;
     for (unsigned i = 0; i < r->settings->settle_cycles; ++i) {
         if (spindle_snapshot(r, &state)) goto failed;
-        printf("SPINDLE rpm=%.6f expected=%.6f at_speed=%d mode=%d sw=0x%04x\n",
-               state.actual_speed, dir * s->rpm, state.at_speed,
+        printf("SPINDLE rpm=%.6f expected=%.6f mode=%d sw=0x%04x\n",
+               state.actual_speed, dir * s->rpm,
                state.mode, state.raw_status);
         if (fabs(state.actual_speed - dir * s->rpm) <= s->speed_tolerance) {
             ready = 1; break;
@@ -481,11 +481,11 @@ static int spindle_speed_case(Runner* r, int dir) {
         if (fabs(state.actual_speed) <= s->speed_tolerance) { ready = 1; break; }
     }
     if (!ready) { fprintf(stderr, "主轴未在规定周期内停转\n"); goto failed; }
-    (void)hal_rt_spindle_estop(r->ctx, spindle_axis(r));
+    (void)hal_rt_axis_estop(r->ctx, spindle_axis(r));
     if (tick(r)) return -1;
     return prompt("确认外部测速、实际转向与记录一致，且主轴已停稳");
 failed:
-    (void)hal_rt_spindle_estop(r->ctx, spindle_axis(r));
+    (void)hal_rt_axis_estop(r->ctx, spindle_axis(r));
     (void)tick(r);
     return -1;
 }
@@ -519,7 +519,7 @@ static int spindle_angle_case(Runner* r) {
     }
     if (call("spindle mode CSP",
              hal_rt_spindle_request_mode(r->ctx, spindle_axis(r), HAL_SPINDLE_CSP)) ||
-        call("spindle enable", hal_rt_spindle_enable(r->ctx, spindle_axis(r), 1))) return -1;
+        call("spindle enable", hal_rt_axis_enable(r->ctx, spindle_axis(r), 1))) return -1;
     int ready = 0;
     for (unsigned i = 0; i < r->settings->settle_cycles; ++i) {
         if (spindle_snapshot(r, &state)) goto failed;
@@ -531,7 +531,7 @@ static int spindle_angle_case(Runner* r) {
     }
     if (prompt("主轴已在 CSP 使能且静止；输入 YES 下发目标角度")) goto failed;
     if (begin_tick(r)) goto failed;
-    int rc = hal_rt_spindle_write_pos(r->ctx, spindle_axis(r), s->angle_target);
+    int rc = hal_rt_axis_write_pos(r->ctx, spindle_axis(r), s->angle_target);
     double expected = 0.0;
     if (!rc) {
         /* 写接口只暂存目标：同一拍读取真正生成的累计目标，再决定是否提交。 */
@@ -549,21 +549,21 @@ static int spindle_angle_case(Runner* r) {
         }
     }
     /* 超限先取消暂存位置，再提交停机指令，不能把超限目标发送到驱动器。 */
-    if (rc) (void)hal_rt_spindle_estop(r->ctx, spindle_axis(r));
+    if (rc) (void)hal_rt_axis_estop(r->ctx, spindle_axis(r));
     int committed = end_tick(r);
-    if (call("hal_rt_spindle_write_pos/angle limit", rc) || committed) goto failed;
+    if (call("hal_rt_axis_write_pos/angle limit", rc) || committed) goto failed;
     for (unsigned i = 0; i < r->settings->settle_cycles; ++i) {
         if (spindle_snapshot(r, &state)) goto failed;
         printf("SPINDLE angle=%.6f expected=%.6f mode=%d sw=0x%04x\n",
                state.position_deg, expected, state.mode, state.raw_status);
         if (fabs(state.position_deg - expected) <= s->angle_tolerance) {
-            (void)hal_rt_spindle_estop(r->ctx, spindle_axis(r));
+            (void)hal_rt_axis_estop(r->ctx, spindle_axis(r));
             if (tick(r)) return -1;
             return prompt("确认主轴实际转角与记录一致，且已经停稳");
         }
     }
 failed:
-    (void)hal_rt_spindle_estop(r->ctx, spindle_axis(r));
+    (void)hal_rt_axis_estop(r->ctx, spindle_axis(r));
     (void)tick(r);
     return -1;
 }
@@ -572,7 +572,7 @@ static int spindle_estop_case(Runner* r) {
     if (!r->settings->spindle.scaling_confirmed ||
         !r->settings->settle_cycles) return -1;
     if (prompt("确认主轴静止、允许使能且实体停机手段可用")) return -1;
-    if (call("spindle enable", hal_rt_spindle_enable(r->ctx, spindle_axis(r), 1))) return -1;
+    if (call("spindle enable", hal_rt_axis_enable(r->ctx, spindle_axis(r), 1))) return -1;
     HalCSpindleStatus state;
     int ready = 0;
     for (unsigned i = 0; i < r->settings->settle_cycles; ++i) {
@@ -581,7 +581,7 @@ static int spindle_estop_case(Runner* r) {
     }
     if (!ready) goto failed;
     if (prompt("主轴已使能且静止；输入 YES 执行软件急停")) goto failed;
-    if (call("hal_rt_spindle_estop", hal_rt_spindle_estop(r->ctx, spindle_axis(r)))) goto failed;
+    if (call("hal_rt_axis_estop", hal_rt_axis_estop(r->ctx, spindle_axis(r)))) goto failed;
     if (tick(r)) goto failed;
     for (unsigned i = 0; i < r->settings->settle_cycles; ++i) {
         if (spindle_snapshot(r, &state)) goto failed;
@@ -590,7 +590,7 @@ static int spindle_estop_case(Runner* r) {
         if (!state.enabled) return 0;
     }
 failed:
-    (void)hal_rt_spindle_estop(r->ctx, spindle_axis(r));
+    (void)hal_rt_axis_estop(r->ctx, spindle_axis(r));
     (void)tick(r);
     return -1;
 }
@@ -609,7 +609,12 @@ static int offset_sample(const HalCConfig* config, int32_t logical, double* pos)
     }
     int result = call("offset wait", hal_rt_wait_cycle(ctx));
     if (!result) result = call("offset begin", hal_rt_begin_cycle(ctx));
-    if (!result) result = call("offset read", hal_rt_axis_read_pos(ctx, (HalAxisId)logical, pos));
+    if (!result) {
+        /* 位置从轴状态快照里取；hal_rt_axis_read_pos 已删（它是 read_status 的纯转发）。 */
+        HalCAxisStatus st;
+        result = call("offset read", hal_rt_axis_read_status(ctx, (HalAxisId)logical, &st));
+        if (!result) *pos = st.actual_pos;
+    }
     if (!result) result = call("offset commit", hal_rt_commit_cycle(ctx));
     (void)hal_context_request_stop(ctx);
     if (call("offset stop", hal_context_stop(ctx))) result = -1;

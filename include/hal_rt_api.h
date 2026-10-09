@@ -83,18 +83,6 @@ int32_t hal_rt_axis_enable(HalContext* c, HalAxisId id, int32_t on);
 int32_t hal_rt_axis_write_pos(HalContext* c, HalAxisId id, double pos);
 
 /**
- * @brief 读最近一次采样的实际位置（用户单位）
- *
- * 只读快照，不触发总线访问。
- *
- * @param c   已 start 的 context
- * @param id  逻辑轴号
- * @param pos 带出实际位置
- * @return int32_t 0 = 成功；其余见文件头
- */
-int32_t hal_rt_axis_read_pos(HalContext* c, HalAxisId id, double* pos);
-
-/**
  * @brief 请求清除驱动器的故障（DS402 Fault Reset）
  *
  * 非阻塞：只置意图，真正的控制字边沿（0x0080）由之后的 hal_rt_begin_cycle 产生。
@@ -171,21 +159,10 @@ int32_t hal_rt_axis_set_pos(HalContext* c, HalAxisId id, double pos);
 int32_t hal_rt_axis_estop(HalContext* c, HalAxisId id);
 
 /**
- * @brief 使能 / 去使能一根主轴
- *
- * @param c  已 start 的 context
- * @param id 逻辑轴号，且必须是主轴
- * @param on 1 = 使能，0 = 去使能；其它值拒绝
- * @return int32_t 0 = 成功；HAL_ERROR_ARGUMENT = 该轴号不是主轴；其余见文件头
- */
-int32_t hal_rt_spindle_enable(HalContext* c, HalAxisId id, int32_t on);
-
-/**
  * @brief 在 CSV 模式下下发转速指令
  *
  * 只在「本拍已 begin 且未 commit」+ 该轴已使能 + 状态机已到位 + 运行模式确为 CSV 时
- * 受理。转向由 dir 决定，所以 rpm 本身不接受负值
- * 本拍带出的 at_speed 先按指令值算，下一拍采样时再按实测刷新。
+ * 受理。转向由 dir 决定，所以 rpm 本身不接受负值。
  *
  * @param c   已 start 的 context
  * @param id  逻辑轴号，且必须是主轴
@@ -196,21 +173,11 @@ int32_t hal_rt_spindle_enable(HalContext* c, HalAxisId id, int32_t on);
 int32_t hal_rt_spindle_write_speed(HalContext* c, HalAxisId id, double rpm, int32_t dir);
 
 /**
- * @brief 读最近一次采样的实际转速
- *
- * @param c   已 start 的 context
- * @param id  逻辑轴号，且必须是主轴
- * @param rpm 带出实际转速（rpm，带符号：正 = 正转）
- * @return int32_t 0 = 成功；其余见文件头
- */
-int32_t hal_rt_spindle_read_speed(HalContext* c, HalAxisId id, double* rpm);
-
-/**
  * @brief 读最近一次采样的主轴状态
  *
  * @param c   已 start 的 context
  * @param id  逻辑轴号，且必须是主轴
- * @param out 带出转速侧快照，含 at_speed（|指令 - 实际| 是否已进入转速窗口）
+ * @param out 带出转速侧快照
  * @return int32_t 0 = 成功；HAL_ERROR_NOT_RUNNING = 还没跑过 begin，没有快照；其余见文件头
  */
 int32_t hal_rt_spindle_read_status(HalContext* c, HalAxisId id, HalCSpindleStatus* out);
@@ -289,9 +256,10 @@ int32_t hal_rt_spindle_orient_state(HalContext* c, HalAxisId id, int32_t* out);
 /**
  * @brief 释放定向，交回普通 DS402 状态机
  *
- * 请求定向时状态机被推到了 SwitchedOn（控制字 0x07，带电不带载）。只清控制字
- * 不会重新使能——**释放后必须重新下发运动指令**，状态机会在后续拍重新爬到
- * OperationEnabled。
+ * 只做一件事：清掉定向状态，让普通 DS402 控制字重新接管。
+ *
+ * **不改变使能意图。** 释放之后轴要不要上力矩是上层的决定，由 hal_rt_axis_enable()
+ * 表达；HAL 不替它选。上层若希望释放后继续运转/保持力矩，自己声明使能即可。
  *
  * @param c  已 start 的 context
  * @param id 逻辑轴号，且必须是主轴
@@ -322,17 +290,6 @@ int32_t hal_rt_spindle_release_orient(HalContext* c, HalAxisId id);
 int32_t hal_rt_axis_readiness(HalContext* c, HalAxisId id, uint32_t* out);
 
 /**
- * @brief 急停一根主轴
- *
- * 语义同 hal_rt_axis_estop，断电还是去使能由该主轴的 estop_action 配置决定。
- *
- * @param c  已 start 的 context
- * @param id 逻辑轴号，且必须是主轴
- * @return int32_t 0 = 成功；其余见文件头
- */
-int32_t hal_rt_spindle_estop(HalContext* c, HalAxisId id);
-
-/**
  * @brief 请求切换主轴的运行模式（CSP / CSV）
  *
  * 只改期望模式，不改变使能状态——急停中的轴不会因为切模式被重新使能。实际切换发生在
@@ -345,27 +302,6 @@ int32_t hal_rt_spindle_estop(HalContext* c, HalAxisId id);
  * @return int32_t 0 = 成功；其余见文件头
  */
 int32_t hal_rt_spindle_request_mode(HalContext* c, HalAxisId id, HalSpindleMode mode);
-
-/**
- * @brief 在 CSP 模式下下发相对既定零点的主轴单圈刻度（度）
- *
- * 对“上电位置为 0°”的主轴，调用方应在启动后首次采样成功且尚未运动时，
- * 调用 hal_rt_axis_set_pos(c, id, 0) 建立本次运行的零点；不依赖驱动器
- * 是否已经把原始位置 PDO 清零。
- * 普通目标位于 [-360, 360]：正数沿正向、负数沿反向到达该刻度；0
- * 取最近的零刻度。方向从上一条已受理目标计算，切入 CSP 时该目标预置为
- * 当前位置；取消运动后再次就绪时也从当时反馈重建基准。连续重复普通目标
- * 不会再转一圈（设零或通用累计位置写入会重置重复判定）；+360/-360 是分别正转/反转
- * 完整一圈的命令，重复调用会重复转圈。
- * 此接口不生成运动轨迹；速度和加速度控制由上层负责。受理条件同
- * hal_rt_axis_write_pos。
- *
- * @param c   已 start 的 context
- * @param id  逻辑轴号，且必须是主轴
- * @param deg 相对既定零点的刻度（度），范围 [-360, 360]；符号指定方向
- * @return int32_t 0 = 成功；其余见文件头
- */
-int32_t hal_rt_spindle_write_pos(HalContext* c, HalAxisId id, double deg);
 
 /**
  * @brief 把本拍采到的输入映像拷到调用方的 PLC X 区

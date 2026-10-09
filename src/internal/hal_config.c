@@ -60,8 +60,7 @@ int32_t hal_config_validate(const HalCConfig* c, char* err, uint32_t len) {
     }
     for (int i = 0; i < c->spindle_count; ++i) {
         const HalCSpindleCfg* s = &c->spindles[i];
-        if (!isfinite(s->max_speed) || s->max_speed <= 0 || !isfinite(s->accel) || s->accel < 0 ||
-            !isfinite(s->speed_window) || s->speed_window < 0)
+        if (!isfinite(s->max_speed) || s->max_speed <= 0)
             return fail(err, len, HAL_ERROR_CONFIG, "主轴转速参数无效");
     }
     for (int i = 0; i < c->io_count + c->panel_count; ++i) {

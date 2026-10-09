@@ -195,7 +195,7 @@ static HalCConfig config(void) {
     c.spindles[0].axis.command_units_per_count = .5;
     c.spindles[0].axis.feedback_units_per_count = .25;
     c.spindles[0].axis.feedback_wrap = HAL_WRAP_MODULAR;
-    c.spindles[0].max_speed = 1000; c.spindles[0].speed_window = .5;
+    c.spindles[0].max_speed = 1000;
     /* 定向：值与位都是厂商专有的，这里用台架那套（0x040F + 状态字 bit10）当样例。 */
     c.spindles[0].axis.vendor_orient_control_word = 0x040Fu;
     c.spindles[0].axis.vendor_orient_done_mask = 0x0400u;
@@ -211,9 +211,16 @@ static HalContext* create(const HalCConfig* cfg) {
 }
 static void begin(HalContext* c) { CHECK(hal_rt_wait_cycle(c) == 0); CHECK(hal_rt_begin_cycle(c) == 0); }
 static void cycle(HalContext* c) { begin(c); CHECK(hal_rt_commit_cycle(c) == 0); }
+/* 位置统一从轴状态快照取：hal_rt_axis_read_pos 已删（它只是 read_status 的纯转发）。 */
+static double axis_pos(HalContext* c, HalAxisId id) {
+    HalCAxisStatus st;
+    CHECK(hal_rt_axis_read_status(c, id, &st) == 0);
+    return st.actual_pos;
+}
+
 static void enable(HalContext* c) {
     CHECK(hal_rt_axis_enable(c, 7, 1) == 0);
-    CHECK(hal_rt_spindle_enable(c, 3, 1) == 0);
+    CHECK(hal_rt_axis_enable(c, 3, 1) == 0);
     for (int i = 0; i < 4; ++i) cycle(c);
 }
 
@@ -307,10 +314,9 @@ static void optional_capabilities(void) {
     HalCAxisStatus status;
     CHECK(hal_rt_axis_read_status(c, 7, &status) == 0 && !status.error_code_valid);
     CHECK(hal_rt_axis_read_status(c, 3, &status) == 0 && status.error_code_valid);
-    /* 实际速度也要能从**轴状态**里读到：进给轴拿不到 hal_rt_spindle_read_speed（它要求
-     * 主轴），而进给率显示要这个数。上面 capability 已经断言过这两根轴一个有速度 PDO、
-     * 一个没有，正好用来钉住"没映射"与"速度为 0"必须能区分——
-     * 分不开的话上层会把"读不到"当成"停着"。 */
+    /* 实际速度要从**轴状态**里读到：进给率显示要这个数，而主轴专用的读接口只收主轴。
+     * 上面 capability 已经断言过这两根轴一个有速度 PDO、一个没有，正好用来钉住
+     * "没映射"与"速度为 0"必须能区分——分不开的话上层会把"读不到"当成"停着"。 */
     servo[0][DEV_DICT_ROLE_ACTUAL_SPEED] = 1234;
     cycle(c);
     CHECK(hal_rt_axis_read_status(c, 3, &status) == 0 &&
@@ -366,16 +372,15 @@ static void motion_io(void) {
      * 反馈当量 .25，旧式 -1234*.25/6 会得到 -51。 */
     servo[0][DEV_DICT_ROLE_ACTUAL_SPEED] = (uint32_t)-1234;
     begin(c);
-    CHECK(hal_rt_spindle_read_status(c, 3, &s) == 0 && s.actual_speed == -1234 && !s.at_speed);
-    /* 贴近指令时 at_speed 置位：指令 -10 rpm，转速窗口 .5。
-     * 上一拍已 begin 未 commit，必须先提交才能进下一次 wait。 */
+    CHECK(hal_rt_spindle_read_status(c, 3, &s) == 0 && s.actual_speed == -1234);
+    /* 上一拍已 begin 未 commit，必须先提交才能进下一次 wait。 */
     CHECK(hal_rt_commit_cycle(c) == 0);
     servo[0][DEV_DICT_ROLE_ACTUAL_SPEED] = (uint32_t)-10;
     begin(c);
-    CHECK(hal_rt_spindle_read_status(c, 3, &s) == 0 && s.actual_speed == -10 && s.at_speed);
+    CHECK(hal_rt_spindle_read_status(c, 3, &s) == 0 && s.actual_speed == -10);
     CHECK(hal_rt_spindle_request_mode(c, 3, HAL_SPINDLE_CSP) == 0);
     CHECK(hal_rt_spindle_write_speed(c, 3, 10, 1) == HAL_ERROR_NOT_ENABLED);
-    CHECK(hal_rt_spindle_estop(c, 3) == 0);
+    CHECK(hal_rt_axis_estop(c, 3) == 0);
     CHECK(hal_rt_axis_write_pos(c, 7, 130) == 0);
     CHECK(hal_rt_axis_estop(c, 7) == 0);
     CHECK(hal_rt_commit_cycle(c) == 0);
@@ -385,11 +390,13 @@ static void motion_io(void) {
     CHECK(servo[0][DEV_DICT_ROLE_OP_MODE] == 9 && servo[0][DEV_DICT_ROLE_CONTROL_WORD] == 0);
     CHECK(servo[1][DEV_DICT_ROLE_CONTROL_WORD] == 7);
     CHECK(hal_rt_spindle_request_mode(c, 3, HAL_SPINDLE_CSP) == 0);
-    CHECK(hal_rt_spindle_enable(c, 3, 1) == 0);
+    CHECK(hal_rt_axis_enable(c, 3, 1) == 0);
     for (int i = 0; i < 5; ++i) cycle(c);
     begin(c);
     CHECK(hal_rt_spindle_read_status(c, 3, &s) == 0 && s.mode == HAL_SPINDLE_CSP && s.enabled);
-    CHECK(hal_rt_spindle_write_pos(c, 3, 30) == 0);
+    /* 主轴在 CSP 下也走通用位置写。hal_rt_spindle_write_pos 已删——它的"单圈刻度 +
+     * 按符号补一圈"是主轴定位的机床语义，归上层；通用写本来就收主轴。 */
+    CHECK(hal_rt_axis_write_pos(c, 3, 30.0) == 0);
     CHECK(hal_rt_commit_cycle(c) == 0 && servo[0][DEV_DICT_ROLE_TARGET_POS] == 60);
     hal_context_destroy(c);
 }
@@ -404,10 +411,11 @@ static void wrap_and_faults(void) {
     servo[0][DEV_DICT_ROLE_ACTUAL_POS] = 100;
     servo[1][DEV_DICT_ROLE_ACTUAL_POS] = (uint32_t)INT32_MAX + 1u;
     cycle(c);
-    double pos;
-    CHECK(hal_rt_axis_read_pos(c, 3, &pos) == 0 && pos == 275);
-    CHECK(hal_rt_axis_read_pos(c, 7, &pos) == 0 && fabs(pos - 429496729.6) < 1e-6);
-    CHECK(hal_rt_spindle_enable(c, 7, 1) == HAL_ERROR_ARGUMENT);
+    CHECK(axis_pos(c, 3) == 275);
+    CHECK(fabs(axis_pos(c, 7) - 429496729.6) < 1e-6);
+    /* 主轴专有接口必须拒绝非主轴轴号（hal_rt_spindle_enable 已删，它是 axis_enable 的纯转发）。 */
+    HalCSpindleStatus not_spindle;
+    CHECK(hal_rt_spindle_read_status(c, 7, &not_spindle) == HAL_ERROR_ARGUMENT);
     hal_context_destroy(c);
     int* failures[] = {&fail_wait, &fail_read, &fail_step, &fail_write, &fail_send};
     for (int i = 0; i < 5; ++i) {
@@ -421,8 +429,8 @@ static void wrap_and_faults(void) {
         const int before = waits + reads + writes + steps + sends;
         CHECK(hal_rt_wait_cycle(c) == HAL_ERROR_BUS);
         CHECK(hal_rt_axis_enable(c, 7, 1) == HAL_ERROR_BUS);
-        CHECK(hal_rt_axis_read_pos(c, 7, &pos) == HAL_ERROR_BUS);
-        CHECK(hal_rt_axis_estop(c, 7) == 0 && hal_rt_spindle_estop(c, 3) == 0);
+        { HalCAxisStatus st; CHECK(hal_rt_axis_read_status(c, 7, &st) == HAL_ERROR_BUS); }
+        CHECK(hal_rt_axis_estop(c, 7) == 0 && hal_rt_axis_estop(c, 3) == 0);
         CHECK(before == waits + reads + writes + steps + sends);
         CHECK(hal_context_stop(c) == 0 && hal_context_start(c, NULL, 0) == 0);
         cycle(c); hal_context_destroy(c);
@@ -434,11 +442,11 @@ static void stop_overrides_staged_enable(void) {
     HalContext* c = create(&cfg);
     CHECK(hal_context_start(c, NULL, 0) == 0);
     CHECK(hal_rt_axis_enable(c, 7, 1) == 0);
-    CHECK(hal_rt_spindle_enable(c, 3, 1) == 0);
+    CHECK(hal_rt_axis_enable(c, 3, 1) == 0);
     cycle(c); cycle(c);
     begin(c);
     CHECK(servo[0][DEV_DICT_ROLE_CONTROL_WORD] == 15 && servo[1][DEV_DICT_ROLE_CONTROL_WORD] == 15);
-    CHECK(hal_rt_axis_estop(c, 7) == 0 && hal_rt_spindle_estop(c, 3) == 0);
+    CHECK(hal_rt_axis_estop(c, 7) == 0 && hal_rt_axis_estop(c, 3) == 0);
     CHECK(hal_rt_commit_cycle(c) == 0);
     CHECK(servo[0][DEV_DICT_ROLE_CONTROL_WORD] == 0 && servo[1][DEV_DICT_ROLE_CONTROL_WORD] == 7);
     CHECK(servo[0][DEV_DICT_ROLE_STATUS_WORD] == 0x40 && servo[1][DEV_DICT_ROLE_STATUS_WORD] == 0x23);
@@ -495,15 +503,16 @@ static void preset_overflow_probe(void) {
         cycle(c);
     }
 
-    double pos = -1;
-    CHECK(hal_rt_axis_read_pos(c, 7, &pos) == 0 && pos > 0);
+    double pos = axis_pos(c, 7);
+    CHECK(pos > 0);
     CHECK(hal_rt_axis_enable(c, 7, 1) == 0);
     cycle(c);                                /* 第一拍 SHUTDOWN */
     cycle(c);                                /* 预置拍 */
     CHECK(servo[slot][DEV_DICT_ROLE_TARGET_POS] == servo[slot][DEV_DICT_ROLE_ACTUAL_POS]);
     cycle(c);
     cycle(c);
-    CHECK(hal_rt_axis_read_pos(c, 7, &pos) == 0 && pos > 0);
+    pos = axis_pos(c, 7);
+    CHECK(pos > 0);
     begin(c);
     CHECK(hal_rt_axis_write_pos(c, 7, pos + 1.0) == 0);
     CHECK(hal_rt_commit_cycle(c) == 0);
@@ -526,202 +535,8 @@ static void preset_overflow_probe(void) {
     const int prior_steps = steps;
     CHECK(hal_rt_begin_cycle(c) == HAL_ERROR_ARGUMENT);
     CHECK(steps == prior_steps); /* 所有轴都未写本拍控制 PDO。 */
-    CHECK(hal_rt_axis_read_pos(c, 7, &pos) == 0);
+    CHECK(isfinite(axis_pos(c, 7)));
     CHECK(hal_context_stop(c) == 0);
-    hal_context_destroy(c);
-}
-
-static void spindle_origin_angle(void) {
-    HalCConfig cfg = config();
-    cfg.spindles[0].axis.command_units_per_count = 1.0;
-    cfg.spindles[0].axis.feedback_units_per_count = 1.0;
-    cfg.spindles[0].axis.feedback_wrap = HAL_WRAP_LINEAR;
-    HalContext* c = create(&cfg);
-    CHECK(hal_context_start(c, NULL, 0) == 0);
-    cycle(c);
-    CHECK(hal_rt_axis_set_pos(c, 3, 0) == 0);
-    CHECK(hal_rt_spindle_request_mode(c, 3, HAL_SPINDLE_CSP) == 0);
-    CHECK(hal_rt_spindle_enable(c, 3, 1) == 0);
-    for (int i = 0; i < 5; ++i) cycle(c);
-
-    begin(c);
-    CHECK(hal_rt_spindle_write_pos(c, 3, -5) == 0);
-    CHECK(hal_rt_commit_cycle(c) == 0);
-    CHECK(servo[0][DEV_DICT_ROLE_TARGET_POS] == 95u); /* 从零点反转到 -5° */
-
-    begin(c);
-    CHECK(hal_rt_spindle_write_pos(c, 3, 350) == 0);
-    CHECK(hal_rt_commit_cycle(c) == 0);
-    CHECK(servo[0][DEV_DICT_ROLE_TARGET_POS] == 450u); /* 沿正向到 +350° */
-
-    begin(c);
-    CHECK(hal_rt_spindle_write_pos(c, 3, 360) == 0);
-    CHECK(hal_rt_commit_cycle(c) == 0);
-    CHECK(servo[0][DEV_DICT_ROLE_TARGET_POS] == 810u);
-
-    begin(c);
-    CHECK(hal_rt_spindle_write_pos(c, 3, -360) == 0);
-    CHECK(hal_rt_commit_cycle(c) == 0);
-    CHECK(servo[0][DEV_DICT_ROLE_TARGET_POS] == 450u);
-
-    servo[0][DEV_DICT_ROLE_ACTUAL_POS] = 450;
-    cycle(c); /* 当前相对启动零点 +350° */
-    begin(c);
-    CHECK(hal_rt_spindle_write_pos(c, 3, 10) == 0);
-    CHECK(hal_rt_commit_cycle(c) == 0);
-    CHECK(servo[0][DEV_DICT_ROLE_TARGET_POS] == 470u); /* +20° 到下一圈的 10° */
-
-    servo[0][DEV_DICT_ROLE_ACTUAL_POS] = 470;
-    cycle(c);
-    begin(c);
-    CHECK(hal_rt_spindle_write_pos(c, 3, 5) == 0);
-    CHECK(hal_rt_commit_cycle(c) == 0);
-    CHECK(servo[0][DEV_DICT_ROLE_TARGET_POS] == 825u); /* +10° → +5°，正转 355° */
-
-    begin(c);
-    CHECK(hal_rt_spindle_write_pos(c, 3, 5) == 0);
-    CHECK(hal_rt_commit_cycle(c) == 0);
-    CHECK(servo[0][DEV_DICT_ROLE_TARGET_POS] == 825u); /* 重复普通刻度不再转圈 */
-
-    begin(c);
-    CHECK(hal_rt_spindle_write_pos(c, 3, 361) == HAL_ERROR_ARGUMENT);
-    CHECK(hal_rt_spindle_write_pos(c, 3, NAN) == HAL_ERROR_ARGUMENT);
-    CHECK(hal_rt_commit_cycle(c) == 0);
-
-    hal_context_destroy(c);
-
-    c = create(&cfg);
-    CHECK(hal_context_start(c, NULL, 0) == 0);
-    cycle(c);
-    CHECK(hal_rt_axis_set_pos(c, 3, 0) == 0);
-    for (int i = 0; i < 3; ++i) {
-        servo[0][DEV_DICT_ROLE_ACTUAL_POS] += 1000000000u;
-        cycle(c);
-    }
-    CHECK(hal_rt_spindle_request_mode(c, 3, HAL_SPINDLE_CSP) == 0);
-    CHECK(hal_rt_spindle_enable(c, 3, 1) == 0);
-    for (int i = 0; i < 5; ++i) cycle(c);
-    CHECK(servo[0][DEV_DICT_ROLE_TARGET_POS] == servo[0][DEV_DICT_ROLE_ACTUAL_POS]);
-    begin(c);
-    CHECK(hal_rt_spindle_write_pos(c, 3, 10) == 0);
-    CHECK(hal_rt_commit_cycle(c) == 0);
-    CHECK(servo[0][DEV_DICT_ROLE_TARGET_POS] == servo[0][DEV_DICT_ROLE_ACTUAL_POS] + 250u);
-    hal_context_destroy(c);
-
-    c = create(&cfg);
-    CHECK(hal_context_start(c, NULL, 0) == 0);
-    servo[0][DEV_DICT_ROLE_ACTUAL_POS] = 0xFFFFFFFEu;
-    cycle(c);
-    CHECK(hal_rt_axis_set_pos(c, 3, 0) == 0);
-    CHECK(hal_rt_spindle_request_mode(c, 3, HAL_SPINDLE_CSP) == 0);
-    CHECK(hal_rt_spindle_enable(c, 3, 1) == 0);
-    for (int i = 0; i < 5; ++i) cycle(c);
-    servo[0][DEV_DICT_ROLE_ACTUAL_POS] = 0xFFFFFFFFu;
-    cycle(c);
-    begin(c);
-    CHECK(hal_rt_spindle_write_pos(c, 3, 10) == 0);
-    CHECK(hal_rt_commit_cycle(c) == 0);
-    CHECK(servo[0][DEV_DICT_ROLE_TARGET_POS] == 8u);
-    hal_context_destroy(c);
-
-    c = create(&cfg);
-    CHECK(hal_context_start(c, NULL, 0) == 0);
-    servo[0][DEV_DICT_ROLE_ACTUAL_POS] = 0x7FFFFFFEu;
-    cycle(c);
-    CHECK(hal_rt_axis_set_pos(c, 3, 0) == 0);
-    CHECK(hal_rt_spindle_request_mode(c, 3, HAL_SPINDLE_CSP) == 0);
-    CHECK(hal_rt_spindle_enable(c, 3, 1) == 0);
-    for (int i = 0; i < 5; ++i) cycle(c);
-    servo[0][DEV_DICT_ROLE_ACTUAL_POS] = 0x7FFFFFFFu;
-    cycle(c);
-    begin(c);
-    CHECK(hal_rt_spindle_write_pos(c, 3, 10) == 0);
-    CHECK(hal_rt_commit_cycle(c) == 0);
-    CHECK(servo[0][DEV_DICT_ROLE_TARGET_POS] == 0x80000008u);
-    hal_context_destroy(c);
-}
-
-
-/* 小数刻度、取消后的基准，以及上机用例所用的提交前限幅流程。 */
-static HalContext* angle_context(double origin, int estop) {
-    HalCConfig cfg = config();
-    cfg.spindles[0].axis.command_units_per_count = .001;
-    cfg.spindles[0].axis.feedback_units_per_count = .001;
-    cfg.spindles[0].axis.feedback_wrap = HAL_WRAP_LINEAR;
-    cfg.spindles[0].axis.estop_action = estop;
-    HalContext* c = create(&cfg);
-    CHECK(hal_context_start(c, NULL, 0) == 0);
-    cycle(c);
-    CHECK(hal_rt_axis_set_pos(c, 3, origin) == 0);
-    CHECK(hal_rt_spindle_request_mode(c, 3, HAL_SPINDLE_CSP) == 0);
-    enable(c);
-    return c;
-}
-static void angle_regressions(void) {
-    HalCAxisStatus status;
-    for (int sign = -1; sign <= 1; sign += 2) {
-        HalContext* c = angle_context(sign * 720., HAL_ESTOP_DISABLE_OPERATION);
-        uint32_t first = 0;
-        for (int i = 0; i < 4; ++i) {
-            begin(c);
-            CHECK(hal_rt_spindle_write_pos(c, 3, sign * .2) == 0);
-            CHECK(hal_rt_axis_read_status(c, 3, &status) == 0);
-            CHECK(fabs(status.command_pos - sign * 720.2) < 1e-9);
-            CHECK(hal_rt_spindle_write_pos(c, 3, NAN) == HAL_ERROR_ARGUMENT);
-            CHECK(hal_rt_commit_cycle(c) == 0);
-            if (!i) first = servo[0][DEV_DICT_ROLE_TARGET_POS];
-            CHECK(servo[0][DEV_DICT_ROLE_TARGET_POS] == first);
-        }
-        /* 累计位置写入和设零必须使旧刻度缓存失效。 */
-        begin(c);
-        CHECK(hal_rt_axis_write_pos(c, 3, sign * 730.) == 0);
-        CHECK(hal_rt_spindle_write_pos(c, 3, sign * .2) == 0);
-        CHECK(hal_rt_axis_read_status(c, 3, &status) == 0);
-        CHECK(fabs(status.command_pos - sign * 1080.2) < 1e-9);
-        CHECK(hal_rt_axis_set_pos(c, 3, sign * 721.) == 0);
-        CHECK(hal_rt_spindle_write_pos(c, 3, sign * .2) == 0);
-        CHECK(hal_rt_axis_read_status(c, 3, &status) == 0);
-        CHECK(fabs(status.command_pos - sign * 1440.2) < 1e-9);
-        for (int i = 0; i < 2; ++i)
-            CHECK(hal_rt_spindle_write_pos(c, 3, sign * 360.) == 0);
-        CHECK(hal_rt_axis_read_status(c, 3, &status) == 0);
-        CHECK(fabs(status.command_pos - sign * 2160.2) < 1e-9);
-        CHECK(hal_rt_commit_cycle(c) == 0);
-        hal_context_destroy(c);
-    }
-    for (int action = 0; action < 4; ++action) {
-        HalContext* c = angle_context(0, action == 2 ? HAL_ESTOP_DISABLE_VOLTAGE : HAL_ESTOP_DISABLE_OPERATION);
-        const uint32_t old_target = servo[0][DEV_DICT_ROLE_TARGET_POS];
-        begin(c);
-        CHECK(hal_rt_spindle_write_pos(c, 3, 350) == 0);
-        if (action == 0) CHECK(hal_rt_spindle_enable(c, 3, 0) == 0);
-        else if (action == 3) CHECK(hal_rt_spindle_request_mode(c, 3, HAL_SPINDLE_CSV) == 0);
-        else CHECK(hal_rt_spindle_estop(c, 3) == 0);
-        CHECK(hal_rt_commit_cycle(c) == 0);
-        CHECK(servo[0][DEV_DICT_ROLE_TARGET_POS] == old_target);
-        for (int i = 0; i < 4; ++i) cycle(c);
-        CHECK(hal_rt_spindle_request_mode(c, 3, HAL_SPINDLE_CSP) == 0);
-        CHECK(hal_rt_spindle_enable(c, 3, 1) == 0);
-        for (int i = 0; i < 5; ++i) cycle(c);
-        begin(c);
-        CHECK(hal_rt_spindle_write_pos(c, 3, 5) == 0);
-        CHECK(hal_rt_axis_read_status(c, 3, &status) == 0);
-        CHECK(fabs(status.command_pos - 5) < 1e-9);
-        CHECK(hal_rt_commit_cycle(c) == 0);
-        hal_context_destroy(c);
-    }
-    HalContext* c = angle_context(.1, HAL_ESTOP_DISABLE_OPERATION);
-    const uint32_t old_target = servo[0][DEV_DICT_ROLE_TARGET_POS];
-    servo[0][DEV_DICT_ROLE_ACTUAL_POS] -= 200u; /* 使能后从 +.1 漂到 -.1 */
-    begin(c);
-    CHECK(hal_rt_spindle_write_pos(c, 3, .05) == 0);
-    CHECK(hal_rt_axis_read_status(c, 3, &status) == 0);
-    CHECK(fabs(status.actual_pos + .1) < 1e-9);
-    CHECK(fabs(status.command_pos - 360.05) < 1e-9);
-    CHECK(fabs(status.command_pos - status.actual_pos) > 1.0);
-    CHECK(hal_rt_spindle_estop(c, 3) == 0); /* 提交前超限取消 */
-    CHECK(hal_rt_commit_cycle(c) == 0);
-    CHECK(servo[0][DEV_DICT_ROLE_TARGET_POS] == old_target);
     hal_context_destroy(c);
 }
 
@@ -952,16 +767,19 @@ static void review_regressions(void) {
         stuck_fault = 0; hal_context_destroy(c);
     }
 
-    /* 固定原始反馈 +100 是合成输入，只检查命令/反馈的符号换算和 at_speed 口径。
+    /* 固定原始反馈 +100 是合成输入，只检查命令/反馈的符号换算。
      * 模拟器不随命令生成真实速度；四组合包含命令与反馈方向不一致的输入。
-     * at_speed == !feedback 不能证明任意方向组合在实机上有效；实际极性须按接线核对。 */
+     * 这组符号关系不能证明任意方向组合在实机上有效；实际极性须按接线核对。 */
     for (int command = 0; command < 2; ++command) for (int feedback = 0; feedback < 2; ++feedback) {
         cfg = config(); cfg.spindles[0].axis.command_invert = command;
         cfg.spindles[0].axis.feedback_invert = feedback;
         c = create(&cfg); CHECK(hal_context_start(c, NULL, 0) == 0); enable(c);
         servo[0][DEV_DICT_ROLE_ACTUAL_SPEED] = 100;
-        begin(c); double rpm;
-        CHECK(hal_rt_spindle_read_speed(c, 3, &rpm) == 0 && rpm == (feedback ? -100 : 100));
+        begin(c);
+        HalCSpindleStatus rpms;
+        CHECK(hal_rt_spindle_read_status(c, 3, &rpms) == 0 &&
+              rpms.actual_speed == (feedback ? -100 : 100));
+        const double rpm = rpms.actual_speed;
         /* 轴状态里的 actual_speed 必须与主轴那条**同源**（含 feedback_invert 的符号）。
          * 两条路各算一遍的话，同一个读数会给出不同的数。 */
         HalCAxisStatus sp_axis;
@@ -970,12 +788,12 @@ static void review_regressions(void) {
         CHECK(hal_rt_spindle_write_speed(c, 3, 100, 1) == 0);
         HalCSpindleStatus speed_status;
         CHECK(hal_rt_spindle_read_status(c, 3, &speed_status) == 0);
-        CHECK(speed_status.command_speed == 100 && speed_status.at_speed == !feedback);
+        CHECK(speed_status.command_speed == 100);
         CHECK(hal_rt_commit_cycle(c) == 0);
         CHECK(servo[0][DEV_DICT_ROLE_TARGET_SPEED] == (command ? (uint32_t)-100 : 100));
         begin(c); CHECK(hal_rt_spindle_write_speed(c, 3, 100, -1) == 0);
         CHECK(hal_rt_spindle_read_status(c, 3, &speed_status) == 0);
-        CHECK(speed_status.command_speed == -100 && speed_status.at_speed == feedback);
+        CHECK(speed_status.command_speed == -100);
         CHECK(hal_rt_commit_cycle(c) == 0);
         CHECK(servo[0][DEV_DICT_ROLE_TARGET_SPEED] == (command ? 100 : (uint32_t)-100));
         hal_context_destroy(c);
@@ -1073,7 +891,7 @@ static void coverage_gaps(void) {
      *    2026-10-08：模式不符与未使能已拆成两个错误码，这里断言的是模式那一个。 */
     cfg = config(); c = create(&cfg);
     CHECK(hal_context_start(c, NULL, 0) == 0);
-    CHECK(hal_rt_spindle_enable(c, 3, 1) == 0);
+    CHECK(hal_rt_axis_enable(c, 3, 1) == 0);
     for (int i = 0; i < 5; ++i) cycle(c);
     begin(c);
     HalCSpindleStatus ss;
@@ -1087,7 +905,7 @@ static void coverage_gaps(void) {
 static void spindle_orient(void) {
     HalCConfig cfg = config(); HalContext* c = create(&cfg);
     CHECK(hal_context_start(c, NULL, 0) == 0);
-    CHECK(hal_rt_spindle_enable(c, 3, 1) == 0);
+    CHECK(hal_rt_axis_enable(c, 3, 1) == 0);
     for (int i = 0; i < 5; ++i) cycle(c);
 
     /* 还没请求时是 NONE；定向期间主轴的伺服在索引 0。 */
@@ -1129,7 +947,7 @@ static void spindle_orient(void) {
     cfg.spindles[0].axis.vendor_orient_done_mask = 0;
     c = create(&cfg);
     CHECK(hal_context_start(c, NULL, 0) == 0);
-    CHECK(hal_rt_spindle_enable(c, 3, 1) == 0);
+    CHECK(hal_rt_axis_enable(c, 3, 1) == 0);
     for (int i = 0; i < 5; ++i) cycle(c);
     begin(c);
     CHECK(hal_rt_spindle_request_orient(c, 3) == HAL_ERROR_UNSUPPORTED);
@@ -1145,12 +963,57 @@ static void spindle_orient(void) {
     hal_context_destroy(c);
 }
 
+/* 释放定向**不得**替上层决定使能意图。
+ *
+ * 场景：定向完成后上层明确要求去使能，紧接着释放定向。
+ * 如果 release_orient 把 request 硬掰回 ENABLE，上层刚下的去使能就被静默吃掉——
+ * 释放只该"把控制字交回状态机"，要不要上力矩是上层的事。
+ *
+ * 断言方式：释放后再跑两拍，看状态机把控制字推到哪。
+ *   尊重意图 → 停在未使能族（0x00/0x06/0x07）
+ *   吃掉意图 → 爬到 0x0F（Enable operation）
+ */
+static void orient_release_keeps_enable_intent(void) {
+    HalCConfig cfg = config(); HalContext* c = create(&cfg);
+    CHECK(hal_context_start(c, NULL, 0) == 0);
+    CHECK(hal_rt_axis_enable(c, 3, 1) == 0);
+    for (int i = 0; i < 5; ++i) cycle(c);
+
+    begin(c);
+    CHECK(hal_rt_spindle_request_orient(c, 3) == 0);
+    CHECK(hal_rt_commit_cycle(c) == 0);
+    servo[0][DEV_DICT_ROLE_STATUS_WORD] = 0x0437u;
+    cycle(c);
+
+    int32_t os = -1;
+    begin(c);
+    CHECK(hal_rt_spindle_orient_state(c, 3, &os) == 0 && os == HAL_ORIENT_DONE);
+
+    /* 上层改主意：去使能，然后释放定向。 */
+    servo[0][DEV_DICT_ROLE_STATUS_WORD] = 0x0023u;
+    CHECK(hal_rt_axis_enable(c, 3, 0) == 0);
+    CHECK(hal_rt_spindle_release_orient(c, 3) == 0);
+    CHECK(hal_rt_commit_cycle(c) == 0);
+
+    cycle(c); cycle(c);
+    {
+        const uint32_t cw = servo[0][DEV_DICT_ROLE_CONTROL_WORD];
+        if (!(cw == 0u || cw == 6u || cw == 7u)) {
+            fprintf(stderr, "line %d: 释放定向把去使能意图吃掉了，控制字=0x%02X\n",
+                    __LINE__, cw);
+            abort();
+        }
+        ++checks;
+    }
+    hal_context_destroy(c);
+}
+
 int main(void) {
     lifecycle(); binding(); optional_capabilities(); motion_io(); wrap_and_faults();
     stop_overrides_staged_enable(); concurrent_stop();
-    preset_overflow_probe(); spindle_origin_angle(); angle_regressions();
+    preset_overflow_probe();
     fault_reset_and_bus_health(); io_image_size(); review_regressions();
     voltage_stop_priority(); standard_enabled_status(); coverage_gaps();
-    spindle_orient();
+    spindle_orient(); orient_release_keeps_enable_intent();
     printf("context_regression: %u checks passed\n", checks);
 }

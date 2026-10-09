@@ -74,8 +74,6 @@ int hal_hardware_test_config(HalCConfig* config, HalHardwareTestSettings* settin
      config->spindles[0].axis.command_units_per_count = 0.16; // deg/count
      config->spindles[0].axis.feedback_units_per_count = 0.16; // deg/count
      config->spindles[0].max_speed = 8000;    // rpm
-     config->spindles[0].accel = 100;
-     config->spindles[0].speed_window = config->spindles[0].max_speed * 0.15; // rpm
      
      settings->observe_cycles = 10000;    // 建议先从有限的小次数开始
      settings->settle_cycles = 10000;     // 运动完成的最大等待周期
