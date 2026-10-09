@@ -14,6 +14,8 @@ static uint32_t inputs[4][64], output[4][64], servo[2][DEV_DICT_ROLE_COUNT];
 static int opened, starts, closes, sends, reads, writes, steps, waits;
 static int fail_init, fail_read, fail_write, fail_step, fail_wait, fail_send, fail_calloc;
 static int wrong_type, bad_width;
+static int wide_mode_bits;    /* 非零 = 模式字按 16 位建句柄（模拟蓝海华腾那类 ESI） */
+static int narrow_pos_bits;   /* 非零 = 位置 PDO 只给 16 位（应被拒） */
 static int omit_optional, omit_spindle_speed;
 static int stuck_fault;      /* 非零 = 连复位边沿也清不掉故障，用来测超时 */
 static int force_serial_zero; /* 非零 = 桩上报 serial=0，用来测 device_id 的哈希回退 */
@@ -52,11 +54,11 @@ int ethercat_init(const MasterConfig* cfg) {
         slots[i].serial = force_serial_zero ? 0 : 99;
         strcpy(slots[i].name, "Dual axis");
         slots[i].entries.slave.statusWord.bit_length = 16;
-        slots[i].entries.slave.act_pos.bit_length = 32;
-        slots[i].entries.slave.act_mode.bit_length = 8;
+        slots[i].entries.slave.act_pos.bit_length = narrow_pos_bits ? 16 : 32;
+        slots[i].entries.slave.act_mode.bit_length = wide_mode_bits ? 16 : 8;
         slots[i].entries.slave.Control_word.bit_length = 16;
         slots[i].entries.slave.target_pos.bit_length = 32;
-        slots[i].entries.slave.Modes_of_operation.bit_length = 8;
+        slots[i].entries.slave.Modes_of_operation.bit_length = wide_mode_bits ? 16 : 8;
         slots[i].entries.slave.act_speed.bit_length = 32;
         slots[i].entries.slave.target_speed.bit_length = 32;
         slots[i].entries.slave.error_code.bit_length = 16;
@@ -323,7 +325,9 @@ static void optional_capabilities(void) {
     omit_spindle_speed = 1;
     c = create(&cfg);
     char error[160];
-    CHECK(hal_context_start(c, error, sizeof(error)) == HAL_ERROR_CONFIG);
+    /* 缺必需 PDO 报 UNSUPPORTED：bind_axis 有意把它和"找不到匹配的轴"(CONFIG) 分开，
+     * start 必须原样报出来，不能一律折成 CONFIG。 */
+    CHECK(hal_context_start(c, error, sizeof(error)) == HAL_ERROR_UNSUPPORTED);
     CHECK(strstr(error, "从站 0 轴 0") && strstr(error, "主轴速度"));
     hal_context_destroy(c);
     omit_spindle_speed = 0;
@@ -1199,6 +1203,29 @@ static void axis_readiness(void) {
     hal_context_destroy(c);
 }
 
+/* PDO 位长判据：位置类必须正好 32 位，其余不窄于语义宽度就收。
+ * 依据是"驱动层读回来右对齐"——位长宽了数值不变，窄了才丢位。 */
+static void pdo_width_policy(void) {
+    HalCConfig cfg = config();
+    char error[160];
+
+    /* 模式字 16 位应当被接受：右对齐读回来照样是 8/9，写进去也一样。
+     * 真机例子：蓝海华腾的 0x6060/0x6061 在 ESI 里就是 16 位。 */
+    wide_mode_bits = 1;
+    HalContext* c = create(&cfg);
+    CHECK(hal_context_start(c, error, sizeof(error)) == 0);
+    hal_context_destroy(c);
+    wide_mode_bits = 0;
+
+    /* 位置 PDO 只有 16 位必须拒：signed32() 会把 0xFFFF 当成 +65535 而不是 -1，
+     * 负位置读成正的，位置环直接飞车。 */
+    narrow_pos_bits = 1;
+    c = create(&cfg);
+    CHECK(hal_context_start(c, error, sizeof(error)) == HAL_ERROR_UNSUPPORTED);
+    hal_context_destroy(c);
+    narrow_pos_bits = 0;
+}
+
 /* 释放定向**不得**替上层决定使能意图。
  *
  * 场景：定向完成后上层明确要求去使能，紧接着释放定向。
@@ -1248,6 +1275,7 @@ int main(void) {
     lifecycle(); binding(); optional_capabilities(); motion_io(); wrap_and_faults();
     stop_overrides_staged_enable(); concurrent_stop();
     preset_overflow_probe(); spindle_origin_angle(); angle_regressions();
+    pdo_width_policy();
     fault_reset_and_bus_health(); io_image_size(); review_regressions();
     voltage_stop_priority(); standard_enabled_status(); coverage_gaps();
     spindle_orient(); orient_release_keeps_enable_intent(); axis_readiness();

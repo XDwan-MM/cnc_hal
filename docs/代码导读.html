@@ -707,7 +707,7 @@ IO      rt_hal_io_fetch_inputs() / rt_hal_io_publish_outputs()
 
     take_requests();                      /* 取走本拍命令并下发 */
     hal_rt_io_flush_outputs(...);
-    rc = hal_rt_commit_cycle(s_ctx);      /* 本拍唯一发送出口 */
+    rc = hal_rt_commit_cycle(s_ctx);      /* 本拍唯一上总线的入口（前面的写都只进主站缓冲） */
     s_in_cycle = 0;
     if (rc) break;
 }</code></pre>

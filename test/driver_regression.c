@@ -31,6 +31,7 @@ static const char* fail_call;
 static int fail_code = -7, fail_index, fail_nth = 1;
 static int sdk_calls, allocations, releases, closes, io_releases, handshakes;
 static int slaves = 1, bad_eeprom, missing_mode, missing_optional, wrong_width, use_fallback;
+static int wide_mode;   /* 非零 = 模式字按 16 位建 ESI（模拟蓝海华腾那类驱动） */
 static int actual_eeprom_length, fallback_reads, fallback_frees;
 static int unknown_device;
 static uint16_t status_word = 0x23, read_fail_index, write_fail_index;
@@ -132,7 +133,10 @@ static size_t make_eeprom(unsigned char* data, int six_axis) {
                         obj->role == DEV_DICT_ROLE_TARGET_SPEED)) continue;
                     PDO_ENTRY_ITEM entry = {0};
                     entry.index = obj->index + 2048 * axis;
-                    entry.bitLen = wrong_width && obj->role == DEV_DICT_ROLE_ACTUAL_POS ? 16 : obj->bits;
+                    entry.bitLen = wrong_width && obj->role == DEV_DICT_ROLE_ACTUAL_POS ? 16
+                                 : wide_mode && (obj->role == DEV_DICT_ROLE_MODE_DISPLAY ||
+                                                 obj->role == DEV_DICT_ROLE_OP_MODE) ? 16
+                                 : obj->bits;
                     memcpy(block + length, &entry, sizeof(entry)); length += sizeof(entry);
                     ++header.entryCount;
                 }
@@ -346,8 +350,22 @@ static void lifecycle_tests(void) {
     CHECK(Master_ServoWrite(0, DEV_DICT_ROLE_TARGET_SPEED, 0) == -2);
     CHECK(ethercat_close() == 0);
     missing_optional = 0;
-    int* bad[] = {&bad_eeprom, &missing_mode, &wrong_width};
-    for (size_t i = 0; i < 3; ++i) {
+    /* 位长**不由这一层判**：master 如实把 ESI 声明的位长带出来，够不够用留给 HAL。
+     * 所以 16 位的位置或模式字都应该绑得上，而且位长原样带出。 */
+    wrong_width = 1;
+    CHECK(ethercat_init(&config) == 0);
+    CHECK(Master_ServoHasRole(0, DEV_DICT_ROLE_ACTUAL_POS));
+    CHECK(g_device_data[0].slave.act_pos.bit_length == 16);
+    CHECK(ethercat_close() == 0);
+    wrong_width = 0;
+    wide_mode = 1;
+    CHECK(ethercat_init(&config) == 0);
+    CHECK(g_device_data[0].slave.act_mode.bit_length == 16);
+    CHECK(g_device_data[0].slave.Modes_of_operation.bit_length == 16);
+    CHECK(ethercat_close() == 0);
+    wide_mode = 0;
+    int* bad[] = {&bad_eeprom, &missing_mode};
+    for (size_t i = 0; i < 2; ++i) {
         *bad[i] = 1; before = handshakes;
         CHECK(ethercat_init(&config) < 0 && handshakes == before);
         if (bad[i] == &missing_mode) CHECK(strstr(Master_StartupError(), "0x6061") != NULL);

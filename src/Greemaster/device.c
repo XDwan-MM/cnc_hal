@@ -340,7 +340,11 @@ static int COERequestResult(const DEVICE_BASIC_INFO* info, const unsigned char* 
 
 /* DS402 标准对象号 —— profile="ds402" 时用它；字典里不写 objects。
  * 这组值对应原硬编码的 6 个 Tx + 4 个 Rx 请求，行为等价。
- * 注意原实现没有绑 target_torque（0x6071），这里也不绑。 */
+ * 注意原实现没有绑 target_torque（0x6071），这里也不绑。
+ *
+ * 末列 bits 是**期望值，不是硬约束**：绑定以设备 ESI 实际声明的位长为准（见 find_object），
+ * 这里只在绑不上时用于报错文案。原因：同一族 DS402 驱动器对 0x6060/0x6061 的声明可能是
+ * 8 位也可能是 16 位（如蓝海华腾），一张全局表服务不了两种。够不够用由 HAL 判。 */
 static const DevDictObject kDs402Std[] = {
     {DEV_DICT_ROLE_STATUS_WORD,   0x6041, 0x00, 16, 1},
     {DEV_DICT_ROLE_ACTUAL_POS,    0x6064, 0x00, 32, 1},
@@ -388,6 +392,9 @@ static RxEntry_Unit* rx_role(slave_addr* axis, DevDictRole role) {
     }
 }
 
+/* 认领一个角色。**位长不跟声明的值比**——句柄带回来的就是 ESI 的实际位长，
+ * 够不够用由 HAL 判（理由见 kDs402Std 上面那段）。这里只挡"物理读不进来"的宽度：
+ * Master_ServoRead 最多按 4 字节读，所以 0 位或 >32 位的 Entry 直接拒。 */
 static int bind_servo_role(Slave_info* list, uint32_t slave_pos, uint32_t slot,
                            const DevDictObject* object, uint32_t pdo, uint32_t entry,
                            int by_index) {
@@ -400,7 +407,7 @@ static int bind_servo_role(Slave_info* list, uint32_t slave_pos, uint32_t slot,
         int rc = by_index
             ? GM_TxPdoEntry_Get_By_Index(&handle, list, slave_pos, pdo, object->index, object->sub)
             : GM_TxPdoEntry_Get_By_Pos(&handle, list, slave_pos, pdo, entry);
-        if (rc != 0 || handle.bit_length != object->bits) return -1;
+        if (rc != 0 || handle.bit_length == 0 || handle.bit_length > 32) return -1;
         *dst = handle;
     } else {
         RxEntry_Unit* dst = rx_role(axis, object->role);
@@ -409,7 +416,7 @@ static int bind_servo_role(Slave_info* list, uint32_t slave_pos, uint32_t slot,
         int rc = by_index
             ? GM_RxPdoEntry_Get_By_Index(&handle, list, slave_pos, pdo, object->index, object->sub)
             : GM_RxPdoEntry_Get_By_Pos(&handle, list, slave_pos, pdo, entry);
-        if (rc != 0 || handle.bit_length != object->bits) return -1;
+        if (rc != 0 || handle.bit_length == 0 || handle.bit_length > 32) return -1;
         *dst = handle;
     }
     return 0;
@@ -433,7 +440,9 @@ static int find_object(const Slave_info* slave, const DevDictObject* object,
                  entry = entry->next, ++entry_index) {
                 if (entry->pdo_entry_index != object->index ||
                     entry->pdo_entry_subindex != object->sub) continue;
-                if (found || entry->pdo_entry_bit_length != object->bits) return -1;
+                /* 只按对象号 + 子索引匹配，位长以 ESI 为准（理由见 kDs402Std 上面那段）。
+                 * 同一对象在 ESI 里出现两次仍然算错，照旧拒掉。 */
+                if (found) return -1;
                 *pdo_pos = pdo_index;
                 *entry_pos = entry_index;
                 found = 1;
@@ -477,10 +486,13 @@ int servo_addr_config(Slave_info* list, uint32_t slave_pos, uint32_t slot) {
         if (bind_servo_role(list, slave_pos, slot, &objects[i], pdo, entry, 0) != 0)
             return -1;
     }
+    /* 只查六个必需角色**在不在**（绑上了位长就非 0）。位长够不够不在这里判——
+     * 那是 HAL 的事：只有它知道自己的读写代码能吃多宽，而且它已经有一套分角色的判据
+     * （位置类必须 32 位，其余不窄于语义宽度）。这一层如实反映 ESI 说了什么。 */
     const slave_addr* h = &g_device_data[slot].slave;
-    if (h->statusWord.bit_length != 16 || h->act_pos.bit_length != 32 ||
-        h->act_mode.bit_length != 8 || h->Control_word.bit_length != 16 ||
-        h->target_pos.bit_length != 32 || h->Modes_of_operation.bit_length != 8) {
+    if (!h->statusWord.bit_length || !h->act_pos.bit_length || !h->act_mode.bit_length ||
+        !h->Control_word.bit_length || !h->target_pos.bit_length ||
+        !h->Modes_of_operation.bit_length) {
         snprintf(g_bind_error, sizeof(g_bind_error),
                  "从站 %u 槽 %u 缺少必需 DS402 角色", slave_pos, slot);
         return -1;

@@ -20,45 +20,19 @@
 
 #include <stdint.h>
 
-/* 7.0：只做两件事，都是"把不属于 HAL 的判定挪走"：
- *      - 删 HalCSpindleCfg.accel（HAL 不生成加减速曲线，纯占位）、
- *        HalCSpindleCfg.speed_window 与 HalCSpindleStatus.at_speed
- *        （"到速"是上层 M 代码的握手判据，而且上层自己又算了一遍）。
- *        删字段按本文件的策略是 MINOR。
- *      - hal_rt_spindle_release_orient() 不再替上层把轴重新使能：释放后要不要
- *        上力矩由 hal_rt_axis_enable() 表达。
- *      - hal_rt_axis_readiness() 的 HAL_READY_MODE_* 口径改对：原来拿**配置的
- *        work_mode**当目标模式比，主轴为 M29/攻丝切到位置模式后会永远报"没就绪"，
- *        与 write_pos 的受理条件矛盾。现在只比「驱动器实际模式 vs HAL 要求的模式」，
- *        HAL_READY_MODE_DESIRED 删除（0x08 位留空不复用）。
- *      以上两条都是语义变更，所以本版按 MAJOR 记。
- *
- *      **函数一个没删。** 主轴专用入口（spindle_enable / spindle_estop /
- *      spindle_write_pos / spindle_read_speed / axis_read_pos …）是与 RT 侧约定好的
- *      接口面，不按"是不是纯转发"来裁。本版一度误删了 5 个，随后全部原样恢复。
- * 6.0：新增主轴定向三个函数 + HalCAxisCfg 的 vendor_orient_control_word /
- *      vendor_orient_done_mask 两个字段。函数增按本文件的策略是 MAJOR。
- * 5.1：HalCAxisStatus 增 actual_speed / speed_valid —— 进给轴也要能读到实际速度。
- *      只加字段、不加函数，按本文件的策略是 MINOR。
- * 5.0：新增 hal_io_image_size()（函数增按本文件的策略是 MAJOR）。
- * 4.0：新增故障复位与总线健康查询两个公共函数，并新增
- *      HalCConfig.fault_reset_timeout_ms 字段。 */
-#define HAL_C_ABI_MAJOR  7u
-#define HAL_C_ABI_MINOR  0u
+#define HAL_C_ABI_MAJOR  7u     /* 契约/语义版本：函数增删、返回码含义变 */
+#define HAL_C_ABI_MINOR  0u     /* 结构布局版本：字段增删改序 */
 
-/* ---- HAL 发行版本 ----
- * **和上面的 ABI 版本是两回事**：ABI 管"二进制能不能对上号"，一改就得 HAL 库、
- * RT、固件包一起升级；发行版本是这批代码对外叫什么，改它不影响编译期闸门，
- * 所以这里只给宏、不加查询函数（加函数按本文件的策略就是 MAJOR 变更）。 */
-#define HAL_VERSION_MAJOR  0u
-#define HAL_VERSION_MINOR  1u
-#define HAL_VERSION_PATCH  0u
-#define HAL_VERSION_STRING "0.1"
+/* ---- HAL 发行版本 ---- */
+#define HAL_VERSION_MAJOR  0u       /* 主版本 */
+#define HAL_VERSION_MINOR  1u       /* 次版本 */
+#define HAL_VERSION_PATCH  0u       /* 修订号 */
+#define HAL_VERSION_STRING "0.1"    /* 字符串形式，日志与上报用；须与上面三个保持一致 */
 
 #define HAL_C_MAX_DEV     30u   /* 轴 / IO / 面板 各自的容量上限 */
 #define HAL_C_MAX_SPINDLE 4u    /* 主轴容量上限（一台机床几根就够） */
-#define HAL_C_NAME_LEN    64u
-#define HAL_INVALID_ID    UINT16_MAX
+#define HAL_C_NAME_LEN    64u   /* 定长名称缓冲长度。字符串一律定长数组，不用 char*（见文件头） */
+#define HAL_INVALID_ID    UINT16_MAX  /* 无效 HalAxisId 的哨兵。0 是合法轴号，所以取最大值 */
 
 /* ---- 不透明句柄 ---- */
 typedef struct HalContext HalContext;
@@ -67,13 +41,13 @@ typedef struct HalContext HalContext;
 typedef uint16_t HalAxisId;      /* **就是逻辑轴号本身**，不是装配下标 */
 
 /* 按轴实例查询的功能。0x6FFF 报警控制尚无设备定义，因此不会宣告可用。 */
-#define HAL_FUNC_POSITION       1u
-#define HAL_FUNC_SPEED          2u
-#define HAL_FUNC_ERROR_CODE     3u
-#define HAL_FUNC_ALARM_CONTROL  4u
-#define HAL_CAP_READY           1u
-#define HAL_CAP_UNSUPPORTED     2u
-#define HAL_CAP_NOT_CONFIGURED  3u
+#define HAL_FUNC_POSITION       1u  /* 位置：0x607A 目标位置 + 0x6064 实际位置 */
+#define HAL_FUNC_SPEED          2u  /* 速度：0x60FF 目标转速 + 0x606C 实际转速（两个都要有） */
+#define HAL_FUNC_ERROR_CODE     3u  /* 故障码 0x603F */
+#define HAL_FUNC_ALARM_CONTROL  4u  /* 厂商专有报警控制 0x6FFF；当前无设备定义，恒不可用 */
+#define HAL_CAP_READY           1u  /* 该功能可用 */
+#define HAL_CAP_UNSUPPORTED     2u  /* 设备不支持、或没绑这个 PDO；reason 里写明缺什么 */
+#define HAL_CAP_NOT_CONFIGURED  3u  /* 不是设备不行，是 HAL 侧还没配这个功能 */
 
 typedef struct {
     uint32_t function;
@@ -92,11 +66,12 @@ typedef struct {
 #define HAL_WRAP_LINEAR       0   /* 线性计数 */
 #define HAL_WRAP_MODULAR      1   /* 模循环（主轴：模每转脉冲数） */
 
-/* 0 无效，必须由机床配置显式选择。 */
-#define HAL_ESTOP_DISABLE_OPERATION 1
-#define HAL_ESTOP_DISABLE_VOLTAGE   2
-#define HAL_SPINDLE_CSV 0
-#define HAL_SPINDLE_CSP 1
+/* 急停时对该轴做什么。0 无效，必须由机床配置显式选择。 */
+#define HAL_ESTOP_DISABLE_OPERATION 1   /* 只去使能：停在 SwitchedOn（写 0x07，可收指令、不带载） */
+#define HAL_ESTOP_DISABLE_VOLTAGE   2   /* 撤销电压（写 0x00，断电），最彻底 */
+/* 主轴的期望模式。下面是 HAL 自己的取值，与驱动器的 0x6060 不是一回事（映射见括号）。 */
+#define HAL_SPINDLE_CSV 0               /* 速度模式，映射到 0x6060 = 9 */
+#define HAL_SPINDLE_CSP 1               /* 位置模式，映射到 0x6060 = 8 */
 typedef int32_t HalSpindleMode;
 
 /* ============================================================================
@@ -128,7 +103,7 @@ typedef struct {
                                            外接编码器/光栅尺可能只需要翻反馈 */
     double  enc_off;                    /* 已保存的坐标偏置；旧 RT 语义：原始位置 - enc_off */
 
-    /* ---- 主轴定向（厂商专有，可选）----
+    /* ---- 主轴定向（厂商专有，可选，暂定）----
      * 定向不是标准 DS402 动作：驱动器收到一个厂商规定的控制字后自行减速并对准，
      * 完成标志在状态字的某一位上。**值与位都是驱动器专有的**，所以由设备字典配、
      * 不写死在 HAL 里。两个都为 0 表示该轴不支持定向——此时定向接口返回

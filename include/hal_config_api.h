@@ -13,32 +13,21 @@
 #define HAL_ERROR_STATE       0x0001  /* 调用顺序错误，phase 不对：write_* 要在 begin 与 commit 之间；wait 要求上一拍已 commit */
 #define HAL_ERROR_MEMORY      0x000C  /* 内存分配失败（context 或内部缓冲） */
 #define HAL_ERROR_TIMEOUT     0x0104  /* 启动总预算耗尽：等主站/状态机就位超时 */
-#define HAL_ERROR_UNSUPPORTED 0x0105  /* 设备不支持该功能：PDO 没绑、定向没配。**不静默当成功** */
-/* 轴的实时状态没到位。以前这些情况一律回 NOT_RUNNING，上层分不出"没使能"
- * 和"模式还没切过来"——而这两件事的处理方式完全不同（一个要等使能，一个要等模式）。 */
+#define HAL_ERROR_UNSUPPORTED 0x0105  /* 设备不支持该功能：PDO 没绑或位长不合规、定向没配。**不静默当成功** */
 #define HAL_ERROR_NOT_ENABLED   0x0106  /* 轴尚未使能，或状态机还没到位。写指令被拒，等使能/等状态机 */
 #define HAL_ERROR_MODE_MISMATCH 0x0107  /* 运行模式未到位：实际或期望模式不是该指令要求的 CSP（写位置）或 CSV（写转速） */
-
-/* hal_rt_axis_readiness 的位。用宏不用 enum，与文件内其它取值同一条规矩。
- * 全 0 = 就绪；判据与 write_pos / write_speed 的受理条件对齐，实现在 hal_context.c。 */
 #define HAL_READY_PHASE        0x01u  /* 不在 begin 与 commit 之间（调用时机错） */
 #define HAL_READY_NOT_ENABLED  0x02u  /* 尚未到 OperationEnabled */
 #define HAL_READY_NOT_READY    0x04u  /* 状态机或采样未到位 */
 #define HAL_READY_MODE_ACTUAL  0x10u  /* 驱动器实际模式（0x6061）还没跟上 HAL 要求的模式——切换还没生效 */
-/* 0x08 原来是 MODE_DESIRED（"目标模式与配置的工作模式不一致"）。那条判据把
- * "正常切模式"当成了"没就绪"：主轴配置是速度模式，M29/攻丝切到位置模式后它永远为真，
- * 而此刻 write_pos 其实是受理的 —— 与受理条件矛盾，已删。
- * 位号**留空不复用**，免得旧代码读到的 0x08 被当成别的意思。 */
 
-/* 故障复位进展（hal_rt_axis_fault_reset_state 的出参）。
- * 用宏不用 enum：C 的 enum 底层宽度由实现定义，不适合跨 ABI（与 hal_types.h 同一条规矩）。 */
+/* 以下为复位状态 */
 #define HAL_RESET_NONE     0   /* 无复位请求，或被显式停止取消；不表示复位成功 */
 #define HAL_RESET_PENDING  1   /* 已请求，正在生成低/高脉冲并等待离开 Fault */
 #define HAL_RESET_DONE     2   /* 已完成：状态字已离开 Fault。轴保持未使能 */
 #define HAL_RESET_TIMEOUT  3   /* 超时仍未离开 Fault。轴保持未使能 */
 
-/* 主轴定向进展（hal_rt_spindle_orient_state 的出参）。
- * 定向期间由 HAL 每拍下发厂商控制字，普通 DS402 推进暂停。 */
+/* 以下为定向状态 */
 #define HAL_ORIENT_NONE     0   /* 未请求；普通速度/位置控制照常 */
 #define HAL_ORIENT_RUNNING  1   /* 已请求，等状态字的 done 位 */
 #define HAL_ORIENT_DONE     2   /* done 位置起。保持控制字直到 release */

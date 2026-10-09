@@ -166,18 +166,32 @@ static uint64_t identity_hash(const DeviceSlot* s) {
 static int bind_axis(Axis* a, const DeviceSlot* slots, int count) {
     a->slot = -1;
     for (int i = 0; i < count; ++i) {
-        const DeviceSlot* s = &slots[i];
+        const DeviceSlot* s = &slots[i]; // 只认同一从站、同一轴序号的伺服或 GREE 轴
         if (s->slave_pos != a->cfg.slave_pos || s->axis_index != a->cfg.axis_index) continue;
         if (s->type != SERVO_TYPE && s->type != GREE_AXIS6_TYPE && s->type != GREE_AXIS4_TYPE) continue;
         a->slot = i;
+        /* 六个必需 PDO 的位长：**不是**一律"精确等于"，分两种判。
+         *   - 位置类 0x6064 / 0x607A **必须正好 32 位**：读取走 signed32()（写死 32 位补码），
+         *     写入要放完整 int32 计数。窄了会静默错符号/截断——16 位位置 PDO 会把 0xFFFF
+         *     当成 +65535 而不是 -1。这是"宁可拒绝启动，不要悄悄算错"的那一类。
+         *   - 其余四项只要**不窄于语义宽度**：驱动层读回来是右对齐的（见 entry_access.h），
+         *     位长宽了数值不变，窄了才丢位。状态字/控制字因此允许 16..32，模式字允许 8..32
+         *     —— 有的驱动器（如蓝海华腾）ESI 里 0x6060/0x6061 就声明成 16 位。 */
         const slave_addr* h = &s->entries.slave;
-        if (h->statusWord.bit_length != 16 || h->act_pos.bit_length != 32 ||
-            h->act_mode.bit_length != 8 || h->Control_word.bit_length != 16 ||
-            h->target_pos.bit_length != 32 || h->Modes_of_operation.bit_length != 8)
+        if (h->act_pos.bit_length != 32 || h->target_pos.bit_length != 32 ||
+            h->statusWord.bit_length < 16 || h->statusWord.bit_length > 32 ||
+            h->Control_word.bit_length < 16 || h->Control_word.bit_length > 32 ||
+            h->act_mode.bit_length < 8 || h->act_mode.bit_length > 32 ||
+            h->Modes_of_operation.bit_length < 8 || h->Modes_of_operation.bit_length > 32)
             return HAL_ERROR_UNSUPPORTED;
+        /* 速度与错误码是**可选能力**：位长不合规只降级成"没有这个能力"，不拒绝配置
+         * （has_speed / has_error 置 0，读出来记 0，hal_axis_capability 会报 UNSUPPORTED）。
+         * 唯一例外是主轴——转速读写是它的基本功能，缺速度 PDO 直接拒。 */
         a->has_speed = h->act_speed.bit_length == 32 && h->target_speed.bit_length == 32;
         a->has_error = h->error_code.bit_length == 16;
+        /* 主轴不允许没有速度模式*/
         if (a->spindle && !a->has_speed) return HAL_ERROR_UNSUPPORTED;
+        /* 填充身份信息 */
         a->identity.type = s->type;
         a->identity.vendor_id = s->vendor_id;
         a->identity.product_code = s->product_code;
@@ -347,6 +361,9 @@ int32_t hal_context_start(HalContext* c, char* err, uint32_t len) {
     for (int i = 0; i < c->axis_count; ++i) {
         const int bind_rc = bind_axis(&c->axes[i], slots, n);
         if (bind_rc) {
+            /* 原样报出去：bind_axis 有意区分「PDO 位长不合规」(UNSUPPORTED) 与
+             * 「找不到匹配的轴」(CONFIG)。以前只当布尔用，外面一律看到 CONFIG。 */
+            result = bind_rc;
             const Axis* a = &c->axes[i];
             if (a->slot >= 0) {
                 snprintf(bind_detail, sizeof(bind_detail),
@@ -366,7 +383,8 @@ int32_t hal_context_start(HalContext* c, char* err, uint32_t len) {
         io->y = (uint32_t)(panel ? c->config.panels[j].y_start : c->config.ios[j].y_start);
         const int slave = panel ? c->config.panels[j].slave_pos : c->config.ios[j].slave_pos;
         detail = "IO/面板未找到、类型不匹配或 PDO 位宽无效";
-        if (bind_io(io, slots, n, slave, panel)) goto bad;
+        const int io_rc = bind_io(io, slots, n, slave, panel);
+        if (io_rc) { result = io_rc; goto bad; }   /* 同上，别丢返回码 */
         detail = "IO 与面板的 X/Y 地址段重叠";
         for (int k = 0; k < i; ++k)
             if (overlap(io->x, io->in_bytes, c->ios[k].x, c->ios[k].in_bytes) ||
@@ -442,6 +460,14 @@ int32_t hal_device_identity(const HalContext* c, HalAxisId id, HalCIdentity* out
     return HAL_OK;
 }
 
+/* 轴能力查询。答案全部来自 **start 认领设备时定下的绑定结果**（有没有速度 PDO、
+ * 有没有错误码 PDO），不访问总线，所以运行期也不会变。
+ *
+ * 两点容易误用：
+ *   - 拿不到的能力**不算错误**：返回 0，但把 state 置成 HAL_CAP_UNSUPPORTED，并在
+ *     reason 里写明缺什么。所以"能不能用"要看 state，不能只看返回值。
+ *   - function 只收 POSITION / SPEED / ERROR_CODE。ALARM_CONTROL 是**从站级**能力，
+ *     归 hal_slave_capability，这里按参数错误拒掉——上面那个范围判断就是干这个的。 */
 int32_t hal_axis_capability(const HalContext* c, HalAxisId id, uint32_t function,
                             HalCCapability* out) {
     if (!c || !out || function < HAL_FUNC_POSITION || function > HAL_FUNC_ERROR_CODE)
@@ -568,12 +594,7 @@ static int sample_axis(Axis* a) {
     a->speed.enabled = a->status.enabled;
     a->speed.raw_status = (uint16_t)sw;
     a->speed.position_deg = a->status.actual_pos;
-    /* 速度 PDO 的单位假定为 rpm，不做任何当量换算——直接就是转速。
-     * 2026-09-30 更正：此前按 counts/s 换算（× 反馈当量 ÷ 6），是错的。
-     * 以台架主轴当量 0.16 deg/count 为例，那个假设会让读侧把 1000 rpm 报成
-     * 26.7 rpm、写侧把 37.5 倍放大（单位口径见 docs/api-reference.md 4.3 节）。
-     * 注意：若某台驱动器的速度对象单位是 0.1 rpm（不少驱动默认如此），这里
-     * 需要分别确认读写比例，当前接口尚不支持配置——换机器前先核对对象字典。 */
+    /* 速度 PDO 的单位假定为 rpm，不做任何当量换算——直接就是转速*/
     a->speed.actual_speed = a->has_speed ?
         signed32(velocity) * (a->cfg.feedback_invert ? -1 : 1) : 0;
     /* 轴状态里给**同一份**读数：进给轴拿不到 spindle 那个出参（它要求主轴），而实际
@@ -584,19 +605,18 @@ static int sample_axis(Axis* a) {
     return HAL_OK;
 }
 
-/* 周期第二拍：采所有轴、各推一拍 DS402、读 IO 输入。此后 read_* 才有效。
- * 使能/取消运动/急停留下的 zero_speed 在这里发一次速度目标 0，
- * 防止上一轮的转速在本拍被重新写下去。 */
+/* 周期第二拍：采样所有轴、各推一拍 DS402、读 IO 输入。走过这一拍，read_* 才有效。 */
 int32_t hal_rt_begin_cycle(HalContext* c) {
     int rc = gate(c); if (rc) return rc;
-    if (c->phase != 1) return HAL_ERROR_STATE;
+    if (c->phase != 1) return HAL_ERROR_STATE;   /* 必须已经 wait 过 */
     ++c->cycle_seq;   /* 本拍编号。故障复位的超时判据按它算，不打时钟 */
     const int axis_count = c->axis_count; /* 两遍遍历使用同一绑定数量。 */
     Ds402Step planned[HAL_C_MAX_DEV + HAL_C_MAX_SPINDLE];
     uint32_t presets[HAL_C_MAX_DEV + HAL_C_MAX_SPINDLE];
     uint8_t override_preset[HAL_C_MAX_DEV + HAL_C_MAX_SPINDLE] = {0};
     uint8_t reset_control[HAL_C_MAX_DEV + HAL_C_MAX_SPINDLE] = {0};
-    /* 所有轴先采样并检查换算，再写任何控制 PDO；后面的轴不能让前面的轴半途使能。 */
+    /* ---- 第一遍：只决定这拍写什么 ----
+     * 所有轴先采样并检查换算，再写任何控制 PDO；后面的轴不能让前面的轴半途使能。 */
     for (int i = 0; i < axis_count; ++i) {
         Axis* a = &c->axes[i];
         if (sample_axis(a)) return bus_error(c);
@@ -612,6 +632,7 @@ int32_t hal_rt_begin_cycle(HalContext* c) {
                 a->request = DS402_REQ_DISABLE;
             }
         }
+        /* 按当前状态字推出这拍要写的控制字与期望模式。 */
         planned[i] = Ds402_NextStepReq(a->status.raw_status, (uint16_t)a->mode,
             a->request, (uint16_t)a->desired_mode, DS402_MODESW_DISABLE_FIRST);
         /* 主轴定向：厂商专有控制字，暂停普通 DS402 推进。
@@ -636,15 +657,20 @@ int32_t hal_rt_begin_cycle(HalContext* c) {
                 }
             }
         }
+        /* 只在"命令与反馈坐标系不同"时才算预置目标值；同坐标系交给驱动层。 */
         override_preset[i] = planned[i].preset_target &&
             (command_scale(a) != feedback_scale(a) ||
              a->command_offset != a->feedback_offset);
+        /* 预置值超出 int32 就直接返回——此时**一个控制 PDO 都还没写**。 */
         if (override_preset[i] &&
             to_counts((a->status.actual_pos - a->command_offset) / command_scale(a), &presets[i]))
             return HAL_ERROR_ARGUMENT;
     }
+    /* ---- 第二遍：真正写总线。任一次读写失败都走 bus_error()，首个错误码被闭锁。 ---- */
     for (int i = 0; i < axis_count; ++i) {
         Axis* a = &c->axes[i];
+        /* 使能、取消运动、急停留下的清零，在这里补发一次速度目标 0；
+         * 不补的话，驱动器会继续按上一轮的目标转速跑。 */
         if (a->zero_speed && a->has_speed) {
             if (Master_ServoWrite(a->slot, DEV_DICT_ROLE_TARGET_SPEED, 0)) return bus_error(c);
             a->zero_speed = 0;
@@ -660,17 +686,21 @@ int32_t hal_rt_begin_cycle(HalContext* c) {
         if (planned[i].preset_target) {
             if (override_preset[i] &&
                 Master_ServoWrite(a->slot, DEV_DICT_ROLE_TARGET_POS, presets[i])) return bus_error(c);
-            a->status.command_pos = a->status.actual_pos;
+            a->status.command_pos = a->status.actual_pos;   /* 命令侧拉平到反馈，免得下一拍写位置时跳 */
             a->angle_valid = 0;
         }
         if (a->request == DS402_REQ_ENABLE) a->stop_override = 0;
+        /* motion_ready = 已请求使能、且状态机这拍已 DONE。它是 write_* 的受理条件之一。 */
         a->motion_ready = a->request == DS402_REQ_ENABLE && planned[i].kind == DS402_STEP_DONE;
+        /* 主轴首次就绪时把刻度基准锚在当前位置——此后 write_pos 的 deg 相对它算。 */
         if (a->spindle && a->motion_ready && !a->angle_base_valid) {
             a->status.command_pos = a->status.actual_pos;
             a->angle_base_valid = 1;
             a->angle_valid = 0;
         }
     }
+    /* 先清空本拍输入映像，再逐 Entry 读并**按位展开**成字节映像（不是整字对齐）。
+     * Entry 位长与绑定时记录的不一致 → 总线错误。 */
     for (int i = 0; i < c->io_count; ++i) {
         Io* io = &c->ios[i];
         memset(io->inputs, 0, sizeof(io->inputs));
