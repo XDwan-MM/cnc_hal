@@ -1144,6 +1144,52 @@ static void spindle_orient(void) {
     hal_context_destroy(c);
 }
 
+/* hal_rt_axis_readiness：**只读**说明"还差什么才能受理运动指令"。
+ * 这个接口此前是公共 API 却一条用例都没有 —— 补上，顺便把它的口径钉住。 */
+static void axis_readiness(void) {
+    uint32_t r = 0xFFFFFFFFu;
+    HalCConfig cfg = config();
+    HalContext* c = create(&cfg);
+    CHECK(hal_context_start(c, NULL, 0) == 0);
+
+    /* 没跑过 begin：不在 begin 与 commit 之间 */
+    CHECK(hal_rt_axis_readiness(c, 7, &r) == 0 && (r & HAL_READY_PHASE));
+
+    begin(c);
+    /* 窗口内、但还没使能 */
+    CHECK(hal_rt_axis_readiness(c, 7, &r) == 0);
+    CHECK((r & HAL_READY_PHASE) == 0);
+    CHECK(r & HAL_READY_NOT_ENABLED);
+    CHECK(hal_rt_commit_cycle(c) == 0);
+
+    /* 使能并等状态机爬到 OperationEnabled。进给轴配置就是位置模式，
+     * 模式两位也该清掉，最终全 0 = 可受理。 */
+    CHECK(hal_rt_axis_enable(c, 7, 1) == 0);
+    for (int i = 0; i < 20; ++i) {
+        cycle(c);
+        begin(c);
+        CHECK(hal_rt_axis_readiness(c, 7, &r) == 0);
+        CHECK(hal_rt_commit_cycle(c) == 0);
+        if (r == 0) break;
+    }
+    CHECK(r == 0);
+
+    /* 主轴：配置的工作模式是速度（CSV）。一旦被请求切到位置（CSP），
+     * 模式两位就置起来了 —— 注意这是相对**配置工作模式**的差距，不是相对
+     * "本次请求"。此刻 hal_rt_axis_write_pos 其实是**受理**的，两者判据不一致
+     * （见 HANDOFF 第十一节，未定论，用例先如实记录现状）。 */
+    begin(c);   /* 必须在窗口里：上面循环最后一次已经 commit 了 */
+    CHECK(hal_rt_spindle_request_mode(c, 3, HAL_SPINDLE_CSP) == 0);
+    CHECK(hal_rt_axis_readiness(c, 3, &r) == 0);
+    CHECK(r & (HAL_READY_MODE_DESIRED | HAL_READY_MODE_ACTUAL));
+    CHECK(hal_rt_commit_cycle(c) == 0);
+
+    /* 轴不存在 / 出参为空 */
+    CHECK(hal_rt_axis_readiness(c, 99, &r) == HAL_ERROR_ARGUMENT);
+    CHECK(hal_rt_axis_readiness(c, 7, NULL) == HAL_ERROR_ARGUMENT);
+    hal_context_destroy(c);
+}
+
 /* 释放定向**不得**替上层决定使能意图。
  *
  * 场景：定向完成后上层明确要求去使能，紧接着释放定向。
@@ -1195,6 +1241,6 @@ int main(void) {
     preset_overflow_probe(); spindle_origin_angle(); angle_regressions();
     fault_reset_and_bus_health(); io_image_size(); review_regressions();
     voltage_stop_priority(); standard_enabled_status(); coverage_gaps();
-    spindle_orient(); orient_release_keeps_enable_intent();
+    spindle_orient(); orient_release_keeps_enable_intent(); axis_readiness();
     printf("context_regression: %u checks passed\n", checks);
 }
