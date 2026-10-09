@@ -83,6 +83,18 @@ int32_t hal_rt_axis_enable(HalContext* c, HalAxisId id, int32_t on);
 int32_t hal_rt_axis_write_pos(HalContext* c, HalAxisId id, double pos);
 
 /**
+ * @brief 读最近一次采样的实际位置（用户单位）
+ *
+ * 只读快照，不触发总线访问。
+ *
+ * @param c   已 start 的 context
+ * @param id  逻辑轴号
+ * @param pos 带出实际位置
+ * @return int32_t 0 = 成功；其余见文件头
+ */
+int32_t hal_rt_axis_read_pos(HalContext* c, HalAxisId id, double* pos);
+
+/**
  * @brief 请求清除驱动器的故障（DS402 Fault Reset）
  *
  * 非阻塞：只置意图，真正的控制字边沿（0x0080）由之后的 hal_rt_begin_cycle 产生。
@@ -159,6 +171,16 @@ int32_t hal_rt_axis_set_pos(HalContext* c, HalAxisId id, double pos);
 int32_t hal_rt_axis_estop(HalContext* c, HalAxisId id);
 
 /**
+ * @brief 使能 / 去使能一根主轴
+ *
+ * @param c  已 start 的 context
+ * @param id 逻辑轴号，且必须是主轴
+ * @param on 1 = 使能，0 = 去使能；其它值拒绝
+ * @return int32_t 0 = 成功；HAL_ERROR_ARGUMENT = 该轴号不是主轴；其余见文件头
+ */
+int32_t hal_rt_spindle_enable(HalContext* c, HalAxisId id, int32_t on);
+
+/**
  * @brief 在 CSV 模式下下发转速指令
  *
  * 只在「本拍已 begin 且未 commit」+ 该轴已使能 + 状态机已到位 + 运行模式确为 CSV 时
@@ -171,6 +193,16 @@ int32_t hal_rt_axis_estop(HalContext* c, HalAxisId id);
  * @return int32_t 0 = 成功；HAL_ERROR_NOT_RUNNING = 运行状态不满足；其余见文件头
  */
 int32_t hal_rt_spindle_write_speed(HalContext* c, HalAxisId id, double rpm, int32_t dir);
+
+/**
+ * @brief 读最近一次采样的实际转速
+ *
+ * @param c   已 start 的 context
+ * @param id  逻辑轴号，且必须是主轴
+ * @param rpm 带出实际转速（rpm，带符号：正 = 正转）
+ * @return int32_t 0 = 成功；其余见文件头
+ */
+int32_t hal_rt_spindle_read_speed(HalContext* c, HalAxisId id, double* rpm);
 
 /**
  * @brief 读最近一次采样的主轴状态
@@ -288,6 +320,17 @@ int32_t hal_rt_spindle_release_orient(HalContext* c, HalAxisId id);
  * @return int32_t 0 = 成功；HAL_ERROR_ARGUMENT = 轴号不存在或 out 为空；其余见文件头
  */
 int32_t hal_rt_axis_readiness(HalContext* c, HalAxisId id, uint32_t* out);
+
+/**
+ * @brief 急停一根主轴
+ *
+ * 语义同 hal_rt_axis_estop，断电还是去使能由该主轴的 estop_action 配置决定。
+ *
+ * @param c  已 start 的 context
+ * @param id 逻辑轴号，且必须是主轴
+ * @return int32_t 0 = 成功；其余见文件头
+ */
+int32_t hal_rt_spindle_estop(HalContext* c, HalAxisId id);
 
 /**
  * @brief 请求切换主轴的运行模式（CSP / CSV）

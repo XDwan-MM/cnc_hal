@@ -840,6 +840,14 @@ int32_t hal_rt_axis_read_status(HalContext* c, HalAxisId id, HalCAxisStatus* out
 }
 
 /* read_status 的取坐标快捷方式。 */
+int32_t hal_rt_axis_read_pos(HalContext* c, HalAxisId id, double* out) {
+    if (!out) return HAL_ERROR_ARGUMENT;
+    HalCAxisStatus status;
+    const int rc = hal_rt_axis_read_status(c, id, &status);
+    if (!rc) *out = status.actual_pos;
+    return rc;
+}
+
 /* 平移坐标基准，不写运动目标：命令侧与反馈侧偏置一起移，已暂存的原始命令保持不变，
  * 所以驱动器不会因为「设坐标」而动。三个加法都查有限性——偏置溢出不报错会静默丢坐标。 */
 int32_t hal_rt_axis_set_pos(HalContext* c, HalAxisId id, double pos) {
@@ -864,6 +872,19 @@ static int spindle_gate(HalContext* c, HalAxisId id) {
     const int rc = gate(c); if (rc) return rc;
     const Axis* a = find_axis(c, id);
     return a && a->spindle ? HAL_OK : HAL_ERROR_ARGUMENT;
+}
+
+/* 转发到轴的使能路径，主轴侧没有额外语义。 */
+int32_t hal_rt_spindle_enable(HalContext* c, HalAxisId id, int32_t on) {
+    const int rc = spindle_gate(c, id);
+    return rc ? rc : hal_rt_axis_enable(c, id, on);
+}
+
+/* 也只转发；断电还是去使能由该主轴的 estop_action 配置决定。 */
+int32_t hal_rt_spindle_estop(HalContext* c, HalAxisId id) {
+    const Axis* a = find_axis(c, id);
+    if (!a || !a->spindle) return HAL_ERROR_ARGUMENT;
+    return hal_rt_axis_estop(c, id);
 }
 
 /* 只改期望模式，不动使能——急停中的轴不会因为切模式被重新使能。
@@ -967,6 +988,14 @@ int32_t hal_rt_spindle_read_status(HalContext* c, HalAxisId id, HalCSpindleStatu
     return HAL_OK;
 }
 
+/* read_status 的取实际转速快捷方式。 */
+int32_t hal_rt_spindle_read_speed(HalContext* c, HalAxisId id, double* out) {
+    if (!out) return HAL_ERROR_ARGUMENT;
+    HalCSpindleStatus status;
+    const int rc = hal_rt_spindle_read_status(c, id, &status);
+    if (!rc) *out = status.actual_speed;
+    return rc;
+}
 
 /* 普通值是相对既定零点的单圈刻度，符号指定到达方向。
  * 以已受理目标为基准，重复同一普通刻度不会意外再转一圈。 */

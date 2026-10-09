@@ -5,13 +5,13 @@
 > 原因、复现及验收证据见 [HAL 审查修复记录](review/2026-10-04-HAL审查修复记录.md)。
 > 同日二次审查已修正使能状态掩码和撤销电压停止优先级；最新结果与 RT 候选接入验证见
 > [HAL 二次审查与 RT 接入准备](review/2026-10-04-HAL二次审查与RT接入准备.md)。
-> **7.0 相对 6.0 的变化**：删掉几处不属于 HAL 职责或纯转发的接口与字段。
-> 删除的函数：`hal_rt_spindle_enable()` / `hal_rt_spindle_estop()` / `hal_rt_axis_read_pos()` /
-> `hal_rt_spindle_read_speed()`（都是 `hal_rt_axis_*` / `read_status` 的纯转发）。
-> 删除的字段：`HalCSpindleCfg.accel`、`HalCSpindleCfg.speed_window`、
-> `HalCSpindleStatus.at_speed`（"到速"是上层 M 代码握手判据，且上层自己算）。
-> 另：`hal_rt_spindle_release_orient()` 不再替上层把轴重新使能。
-> **`hal_rt_spindle_write_pos()` 保留** —— 主轴单圈刻度下发是与 RT 侧约定好的接口。
+> **7.0 相对 6.0 的变化**：只做两件事，都是"把不属于 HAL 的判定挪走"。
+> **删字段**：`HalCSpindleCfg.accel`（HAL 不生成加减速曲线，纯占位）、
+> `HalCSpindleCfg.speed_window` 与 `HalCSpindleStatus.at_speed`（"到速"是上层 M 代码
+> 的握手判据，而且上层自己又算了一遍）。
+> **改语义**：`hal_rt_spindle_release_orient()` 不再替上层把轴重新使能——释放后要不要
+> 上力矩由 `hal_rt_axis_enable()` 表达。
+> **函数一个没删**：主轴专用入口是与 RT 侧约定好的接口面。
 >
 > **5.0 相对 4.0 的变化**：新增 `hal_io_image_size()`。函数增删按本工程的版本策略属
 > MAJOR，消费者须重编。
@@ -124,7 +124,7 @@ IO／面板也不能与伺服重复占用同一从站。
 
 ### `HalCSpindleCfg`
 
-**主轴专有属性**，在通用轴属性之上加转速侧的`max_speed`。主轴单独一张表，与 `axes[]` 平级。
+**主轴专有属性**，在通用轴属性之上加转速上限。主轴单独一张表，与 `axes[]` 平级。
 
 | 成员 | 类型 | 要求与含义 |
 | --- | --- | --- |
@@ -885,9 +885,9 @@ int32_t hal_rt_begin_cycle(HalContext *c);
 ```c
 if (hal_rt_begin_cycle(ctx) != HAL_OK) { running = 0; return; }
 
-/* 到这里本拍快照才有效：可以读状态、IO 输入；位置在 HalCAxisStatus.actual_pos 里 */
-HalCAxisStatus st;
-hal_rt_axis_read_status(ctx, axis, &st);
+/* 到这里本拍快照才有效：可以读位置、状态、IO 输入 */
+double pos;
+hal_rt_axis_read_pos(ctx, axis, &pos);
 ```
 
 **注意**
@@ -1128,7 +1128,43 @@ if (hal_rt_commit_cycle(ctx) != HAL_OK) { /* 这一次才真正下发 */ }
 - 非有限值（`NaN` / `Inf`）直接返回参数错误。
 - 主轴也可用这个通用位置接口，但单位语义是度。
 
-#### 4.2.4 轴状态读取函数hal_rt_axis_read_status()
+#### 4.2.4 轴位置读取函数hal_rt_axis_read_pos()
+
+**函数原型**
+
+```c
+int32_t hal_rt_axis_read_pos(HalContext *c, HalAxisId id, double *pos);
+```
+
+**函数功能**
+
+读取最近一次采样的实际位置（用户单位）。**只读快照，不触发总线访问。**
+
+**函数参数及返回值**
+
+| 参数名 | 类型 | 说明 |
+| ------ | ---- | ---- |
+| c | `HalContext*` | 已 `start` 的 context |
+| id | `HalAxisId` | 逻辑轴号 |
+| pos | `double*` | 带出实际位置 |
+| 返回值 | `int32_t` | `HAL_OK`；`HAL_ERROR_NOT_RUNNING` = 还没跑过 `begin`，没有快照 |
+
+**示例用法**
+
+```c
+double pos;
+if (hal_rt_axis_read_pos(ctx, axis, &pos) == HAL_OK)
+    printf("轴实际位置：%.4f\n", pos);
+```
+
+**注意**
+
+- 读的是**最近一次 `begin` 采下的快照**，所以数据最多滞后一拍。
+- `begin` 之前调用会返回 `HAL_ERROR_NOT_RUNNING`。
+- 位置已按反馈当量和方向换算为用户单位，并叠加了反馈侧坐标基准。
+- **`position_valid` 当前恒为 1，不代表已经机械回零或经过独立校准。**
+
+#### 4.2.5 轴状态读取函数hal_rt_axis_read_status()
 
 **函数原型**
 
@@ -1181,7 +1217,7 @@ if (hal_rt_axis_read_status(ctx, axis, &st) == HAL_OK) {
 - `enabled` 来自状态字判定，本拍采的是上一拍命令的结果。
 - 检查故障码前先看 `error_code_valid`。
 
-#### 4.2.5 坐标基准设置函数hal_rt_axis_set_pos()
+#### 4.2.6 坐标基准设置函数hal_rt_axis_set_pos()
 
 **函数原型**
 
@@ -1210,8 +1246,8 @@ int32_t hal_rt_axis_set_pos(HalContext *c, HalAxisId id, double pos);
 /* 当前反馈位置 20，把这里定义成 120 */
 hal_rt_axis_set_pos(ctx, axis, 120.0);
 
-HalCAxisStatus st;
-hal_rt_axis_read_status(ctx, axis, &st);   /* st.actual_pos 现在读到 120 */
+double pos;
+hal_rt_axis_read_pos(ctx, axis, &pos);   /* 现在读到 120 */
 /* 驱动器原始位置没变，已暂存的原始运动目标也没变 */
 ```
 
@@ -1228,7 +1264,72 @@ hal_rt_axis_read_status(ctx, axis, &st);   /* st.actual_pos 现在读到 120 */
 主轴用 `HalAxisId` 寻址 —— **它就是一根轴**，只是多了转速语义，没有单独的 `HalSpindleId`。
 下面这些接口都要求 `id` 指向一根**主轴**；传进给轴轴号会返回 `HAL_ERROR_ARGUMENT`。
 
-#### 4.3.1 主轴模式请求函数hal_rt_spindle_request_mode()
+#### 4.3.1 主轴使能函数hal_rt_spindle_enable()
+
+**函数原型**
+
+```c
+int32_t hal_rt_spindle_enable(HalContext *c, HalAxisId id, int32_t on);
+```
+
+**函数功能**
+
+主轴使能／去使能。确认 `id` 对应主轴后，复用进给轴的使能实现。
+
+**函数参数及返回值**
+
+| 参数名 | 类型 | 说明 |
+| ------ | ---- | ---- |
+| c | `HalContext*` | 已 `start` 的 context |
+| id | `HalAxisId` | 逻辑轴号，**且必须是主轴** |
+| on | `int32_t` | `1` = 使能，`0` = 去使能 |
+| 返回值 | `int32_t` | `HAL_OK`；`HAL_ERROR_ARGUMENT` = 该轴号不是主轴；其余见第 5 章 |
+
+**示例用法**
+
+```c
+hal_rt_spindle_enable(ctx, spindle, 1);
+/* 同轴使能：非阻塞、幂等，需轮询 read_status().enabled 确认 */
+```
+
+**注意**
+
+- 语义与 `hal_rt_axis_enable()` **完全一致**：非阻塞、幂等、约 3~4 拍到位，必须轮询确认。
+- `on = 0` 停在 SwitchedOn，**不是断电**；要断电用 `hal_rt_spindle_estop()`。
+
+#### 4.3.2 主轴急停函数hal_rt_spindle_estop()
+
+**函数原型**
+
+```c
+int32_t hal_rt_spindle_estop(HalContext *c, HalAxisId id);
+```
+
+**函数功能**
+
+主轴急停。语义与 `hal_rt_axis_estop()` 相同，**断电还是去使能由该主轴配置的 `estop_action` 决定**。
+
+**函数参数及返回值**
+
+| 参数名 | 类型 | 说明 |
+| ------ | ---- | ---- |
+| c | `HalContext*` | 已 `start` 的 context |
+| id | `HalAxisId` | 逻辑轴号，**且必须是主轴** |
+| 返回值 | `int32_t` | `HAL_OK` = 停止请求已受理；`HAL_ERROR_ARGUMENT` = 不是主轴 |
+
+**示例用法**
+
+```c
+hal_rt_spindle_estop(ctx, spindle);
+/* 返回成功只代表停止意图已记录 */
+```
+
+**注意**
+
+- 复用轴急停的同一份实现，注意事项同 4.2.2：**受理 ≠ 已停**、幂等、恢复须显式使能并确认。
+- 总线故障闭锁时仍受理，但不再发送 PDO。
+
+#### 4.3.3 主轴模式请求函数hal_rt_spindle_request_mode()
 
 **函数原型**
 
@@ -1269,13 +1370,13 @@ if (st.mode == HAL_SPINDLE_CSP) { /* 切换完成 */ }
 
 **注意**
 
-- **不会自动重新使能。** 处于急停或去使能状态的轴，单独调用本函数不会把它重新拉起来 —— 需要显式 `hal_rt_axis_enable()`。
+- **不会自动重新使能。** 处于急停或去使能状态的轴，单独调用本函数不会把它重新拉起来 —— 需要显式 `hal_rt_spindle_enable()`。
 - **非阻塞、幂等**，语义与 `enable` 同一套：必须轮询 `read_status().mode` 确认。
 - **期望模式真的变了才丢弃尚未提交的运动指令**；重复调用无副作用。
 - **预置由 HAL 自动完成。** 从速度模式切进位置模式时，驱动器会朝陈旧的目标位置冲过去 —— 漏一次就是事故，所以这一步是 HAL 兜的。
 - `read_status().mode` 来自驱动器 `0x6061` 的**实际**模式，可能与期望模式暂时不一致。
 
-#### 4.3.2 主轴转速下发函数hal_rt_spindle_write_speed()
+#### 4.3.4 主轴转速下发函数hal_rt_spindle_write_speed()
 
 **函数原型**
 
@@ -1322,7 +1423,42 @@ hal_rt_spindle_write_speed(ctx, spindle, 0.0, 0);
 - **当前速度 PDO 假设为整数 rpm。** 使用 CSV 前须按设备手册、显示值或外部测速确认。
   如果实际单位为 0.1 rpm 或计数/秒，当前接口尚不能配置该比例，不应直接使用。
 
-#### 4.3.3 主轴状态读取函数hal_rt_spindle_read_status()
+#### 4.3.5 主轴转速读取函数hal_rt_spindle_read_speed()
+
+**函数原型**
+
+```c
+int32_t hal_rt_spindle_read_speed(HalContext *c, HalAxisId id, double *rpm);
+```
+
+**函数功能**
+
+读取最近一次采样的**带符号**实际转速（rpm）。**只读快照，不触发总线访问。**
+
+**函数参数及返回值**
+
+| 参数名 | 类型 | 说明 |
+| ------ | ---- | ---- |
+| c | `HalContext*` | 已 `start` 的 context |
+| id | `HalAxisId` | 逻辑轴号，**且必须是主轴** |
+| rpm | `double*` | 带出实际转速，**带符号：正 = 正转** |
+| 返回值 | `int32_t` | `HAL_OK`；`HAL_ERROR_NOT_RUNNING` = 还没跑过 `begin` |
+
+**示例用法**
+
+```c
+double rpm;
+if (hal_rt_spindle_read_speed(ctx, spindle, &rpm) == HAL_OK)
+    printf("主轴实际转速：%.1f rpm（%s）\n", rpm, rpm >= 0 ? "正转" : "反转");
+```
+
+**注意**
+
+- 带出的是**带符号**值，与下发时的 `dir` 口径不同（下发是 `rpm` + `dir` 两个参数）。比较时注意符号。
+- 读的是最近一次 `begin` 的快照，最多滞后一拍。
+- 反馈 rpm = 原始有符号速度 PDO × (`feedback_invert ? -1 : 1`)；不使用位置当量。
+
+#### 4.3.6 主轴状态读取函数hal_rt_spindle_read_status()
 
 **函数原型**
 
@@ -1371,7 +1507,7 @@ if (hal_rt_spindle_read_status(ctx, spindle, &st) == HAL_OK) {
 - `mode` 来自驱动器反馈，可能与 `request_mode` 的期望值暂时不一致。
 - HAL 不生成运动轨迹，也不做速度／转矩限幅。
 
-#### 4.3.4 主轴角度下发函数hal_rt_spindle_write_pos()
+#### 4.3.7 主轴角度下发函数hal_rt_spindle_write_pos()
 
 **函数原型**
 

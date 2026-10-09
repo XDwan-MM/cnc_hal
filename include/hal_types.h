@@ -20,16 +20,17 @@
 
 #include <stdint.h>
 
-/* 7.0：删掉几处**不属于 HAL 职责**或纯转发的东西。
- *      - hal_rt_spindle_enable / hal_rt_spindle_estop / hal_rt_axis_read_pos /
- *        hal_rt_spindle_read_speed：都是 hal_rt_axis_* / read_status 的纯转发，
- *        留着让人以为有两条路。轴状态与主轴状态里本来就有位置和转速。
- *      - HalCSpindleCfg.accel（HAL 不生成加减速曲线，纯占位）、speed_window、
- *        HalCSpindleStatus.at_speed（"到速"是上层 M 代码握手判据，且上层自己算）。
- *      删函数按本文件的策略是 MAJOR。
+/* 7.0：只做两件事，都是"把不属于 HAL 的判定挪走"：
+ *      - 删 HalCSpindleCfg.accel（HAL 不生成加减速曲线，纯占位）、
+ *        HalCSpindleCfg.speed_window 与 HalCSpindleStatus.at_speed
+ *        （"到速"是上层 M 代码的握手判据，而且上层自己又算了一遍）。
+ *        删字段按本文件的策略是 MINOR。
+ *      - hal_rt_spindle_release_orient() 不再替上层把轴重新使能：释放后要不要
+ *        上力矩由 hal_rt_axis_enable() 表达。这条是语义变更，所以本版按 MAJOR 记。
  *
- *      **hal_rt_spindle_write_pos 保留**：主轴单圈刻度下发是与 RT 侧约定好的接口，
- *      不属于"越界"，不删。（曾在本版改动里误删，随后原样恢复。）
+ *      **函数一个没删。** 主轴专用入口（spindle_enable / spindle_estop /
+ *      spindle_write_pos / spindle_read_speed / axis_read_pos …）是与 RT 侧约定好的
+ *      接口面，不按"是不是纯转发"来裁。本版一度误删了 5 个，随后全部原样恢复。
  * 6.0：新增主轴定向三个函数 + HalCAxisCfg 的 vendor_orient_control_word /
  *      vendor_orient_done_mask 两个字段。函数增按本文件的策略是 MAJOR。
  * 5.1：HalCAxisStatus 增 actual_speed / speed_valid —— 进给轴也要能读到实际速度。
@@ -132,7 +133,7 @@ typedef struct {
     uint16_t vendor_orient_done_mask;    /* 如 0x0400（状态字 bit10） */
 } HalCAxisCfg;
 
-/* 主轴 —— 在通用轴属性之上加转速侧的量。
+/* 主轴 —— 在通用轴属性之上加转速上限。
  * 单独一张表，不塞进 axes[]：主轴的固有属性和进给轴不同（定向、
  * 运行期 CSV↔CSP 切换），混在一起会把轴表越弄越脏。
  * @note axis.logical_axis **必须 >= 0** —— 主轴角度接口也用 HalAxisId 寻址。 */
