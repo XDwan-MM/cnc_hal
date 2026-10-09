@@ -20,13 +20,15 @@
 
 #include <stdint.h>
 
-/* 5.1：HalCAxisStatus 增 actual_speed / speed_valid —— 进给轴也要能读到实际速度。
+/* 6.0：新增主轴定向三个函数 + HalCAxisCfg 的 vendor_orient_control_word /
+ *      vendor_orient_done_mask 两个字段。函数增按本文件的策略是 MAJOR。
+ * 5.1：HalCAxisStatus 增 actual_speed / speed_valid —— 进给轴也要能读到实际速度。
  *      只加字段、不加函数，按本文件的策略是 MINOR。
  * 5.0：新增 hal_io_image_size()（函数增按本文件的策略是 MAJOR）。
  * 4.0：新增故障复位与总线健康查询两个公共函数，并新增
  *      HalCConfig.fault_reset_timeout_ms 字段。 */
-#define HAL_C_ABI_MAJOR  5u
-#define HAL_C_ABI_MINOR  1u
+#define HAL_C_ABI_MAJOR  6u
+#define HAL_C_ABI_MINOR  0u
 
 #define HAL_C_MAX_DEV     30u   /* 轴 / IO / 面板 各自的容量上限 */
 #define HAL_C_MAX_SPINDLE 4u    /* 主轴容量上限（一台机床几根就够） */
@@ -100,6 +102,15 @@ typedef struct {
     int32_t feedback_invert;            /* 非零 = 反馈方向取反。**与命令分开**——
                                            外接编码器/光栅尺可能只需要翻反馈 */
     double  enc_off;                    /* 已保存的坐标偏置；旧 RT 语义：原始位置 - enc_off */
+
+    /* ---- 主轴定向（厂商专有，可选）----
+     * 定向不是标准 DS402 动作：驱动器收到一个厂商规定的控制字后自行减速并对准，
+     * 完成标志在状态字的某一位上。**值与位都是驱动器专有的**，所以由设备字典配、
+     * 不写死在 HAL 里。两个都为 0 表示该轴不支持定向——此时定向接口返回
+     * HAL_ERROR_UNSUPPORTED，不会静默当成成功。
+     * 进给轴保持 0 即可。 */
+    uint16_t vendor_orient_control_word; /* 如 0x040F */
+    uint16_t vendor_orient_done_mask;    /* 如 0x0400（状态字 bit10） */
 } HalCAxisCfg;
 
 /* 主轴 —— 在通用轴属性之上加转速侧的几个量。

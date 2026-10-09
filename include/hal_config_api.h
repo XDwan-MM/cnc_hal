@@ -13,6 +13,17 @@
 #define HAL_ERROR_MEMORY      0x000C
 #define HAL_ERROR_TIMEOUT     0x0104
 #define HAL_ERROR_UNSUPPORTED 0x0105
+/* 轴的实时状态没到位。以前这些情况一律回 NOT_RUNNING，上层分不出"没使能"
+ * 和"模式还没切过来"——而这两件事的处理方式完全不同（一个要等使能，一个要等模式）。 */
+#define HAL_ERROR_NOT_ENABLED   0x0106
+#define HAL_ERROR_MODE_MISMATCH 0x0107
+
+/* hal_rt_axis_readiness 的位。用宏不用 enum，与文件内其它取值同一条规矩。 */
+#define HAL_READY_PHASE        0x01u  /* 不在 begin 与 commit 之间 */
+#define HAL_READY_NOT_ENABLED  0x02u  /* 尚未到 OperationEnabled */
+#define HAL_READY_NOT_READY    0x04u  /* 状态机或采样未到位 */
+#define HAL_READY_MODE_DESIRED 0x08u  /* 目标模式与 HAL 记录不一致 */
+#define HAL_READY_MODE_ACTUAL  0x10u  /* 驱动器实际模式与目标不一致 */
 
 /* 故障复位进展（hal_rt_axis_fault_reset_state 的出参）。
  * 用宏不用 enum：C 的 enum 底层宽度由实现定义，不适合跨 ABI（与 hal_types.h 同一条规矩）。 */
@@ -20,6 +31,12 @@
 #define HAL_RESET_PENDING  1   /* 已请求，正在生成低/高脉冲并等待离开 Fault */
 #define HAL_RESET_DONE     2   /* 已完成：状态字已离开 Fault。轴保持未使能 */
 #define HAL_RESET_TIMEOUT  3   /* 超时仍未离开 Fault。轴保持未使能 */
+
+/* 主轴定向进展（hal_rt_spindle_orient_state 的出参）。
+ * 定向期间由 HAL 每拍下发厂商控制字，普通 DS402 推进暂停。 */
+#define HAL_ORIENT_NONE     0   /* 未请求；普通速度/位置控制照常 */
+#define HAL_ORIENT_RUNNING  1   /* 已请求，等状态字的 done 位 */
+#define HAL_ORIENT_DONE     2   /* done 位置起。保持控制字直到 release */
 
 #ifdef __cplusplus
 extern "C" {

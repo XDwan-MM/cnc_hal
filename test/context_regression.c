@@ -196,6 +196,9 @@ static HalCConfig config(void) {
     c.spindles[0].axis.feedback_units_per_count = .25;
     c.spindles[0].axis.feedback_wrap = HAL_WRAP_MODULAR;
     c.spindles[0].max_speed = 1000; c.spindles[0].speed_window = .5;
+    /* 定向：值与位都是厂商专有的，这里用台架那套（0x040F + 状态字 bit10）当样例。 */
+    c.spindles[0].axis.vendor_orient_control_word = 0x040Fu;
+    c.spindles[0].axis.vendor_orient_done_mask = 0x0400u;
     c.io_count = c.panel_count = 1;
     c.ios[0].slave_pos = 1; c.ios[0].x_start = 2; c.ios[0].y_start = 1;
     c.panels[0].slave_pos = 2; c.panels[0].x_start = 10; c.panels[0].y_start = 6;
@@ -371,7 +374,7 @@ static void motion_io(void) {
     begin(c);
     CHECK(hal_rt_spindle_read_status(c, 3, &s) == 0 && s.actual_speed == -10 && s.at_speed);
     CHECK(hal_rt_spindle_request_mode(c, 3, HAL_SPINDLE_CSP) == 0);
-    CHECK(hal_rt_spindle_write_speed(c, 3, 10, 1) == HAL_ERROR_NOT_RUNNING);
+    CHECK(hal_rt_spindle_write_speed(c, 3, 10, 1) == HAL_ERROR_NOT_ENABLED);
     CHECK(hal_rt_spindle_estop(c, 3) == 0);
     CHECK(hal_rt_axis_write_pos(c, 7, 130) == 0);
     CHECK(hal_rt_axis_estop(c, 7) == 0);
@@ -760,8 +763,8 @@ static void fault_reset_and_bus_health(void) {
     /* 只允许在 begin 与 commit 之间受理（request 只有周期线程能写） */
     CHECK(hal_rt_axis_fault_reset(c, 7) == 0);
     CHECK(hal_rt_axis_fault_reset_state(c, 7, &st) == 0 && st == HAL_RESET_PENDING);
-    /* 复位期间不能写位置：request 不是 ENABLE，motion_ready 为假 */
-    CHECK(hal_rt_axis_write_pos(c, 7, 10) == HAL_ERROR_NOT_RUNNING);
+    /* 复位期间不能写位置：request 不是 ENABLE，轴也未使能（2026-10-08 起分码为 NOT_ENABLED） */
+    CHECK(hal_rt_axis_write_pos(c, 7, 10) == HAL_ERROR_NOT_ENABLED);
     CHECK(hal_rt_commit_cycle(c) == 0);
 
     /* 下一拍 begin 才发出 0x80 边沿，该拍 commit 里 mock 让驱动器离开 Fault */
@@ -1021,8 +1024,8 @@ static void standard_enabled_status(void) {
         servo[0][DEV_DICT_ROLE_STATUS_WORD] = servo[1][DEV_DICT_ROLE_STATUS_WORD] = 0x0007;
         begin(c);
         CHECK(hal_rt_axis_read_status(c, 7, &status) == 0 && !status.enabled);
-        CHECK(hal_rt_axis_write_pos(c, 7, 25) == HAL_ERROR_NOT_RUNNING);
-        CHECK(hal_rt_spindle_write_speed(c, 3, 100, 1) == HAL_ERROR_NOT_RUNNING);
+        CHECK(hal_rt_axis_write_pos(c, 7, 25) == HAL_ERROR_NOT_ENABLED);
+        CHECK(hal_rt_spindle_write_speed(c, 3, 100, 1) == HAL_ERROR_NOT_ENABLED);
         CHECK(hal_rt_commit_cycle(c) == 0);
         hal_context_destroy(c);
     }
@@ -1067,7 +1070,7 @@ static void coverage_gaps(void) {
 
     /* 4) 位置写入的 CSP 闸门：主轴处于 CSV 使能态时，通用位置写入必须被拒，
      *    否则 0x607A 会被下发给速度模式驱动器。
-     *    注：`a->mode != CSP` 那一分句在 motion_ready 成立时必然相等，是冗余保护。 */
+     *    2026-10-08：模式不符与未使能已拆成两个错误码，这里断言的是模式那一个。 */
     cfg = config(); c = create(&cfg);
     CHECK(hal_context_start(c, NULL, 0) == 0);
     CHECK(hal_rt_spindle_enable(c, 3, 1) == 0);
@@ -1075,7 +1078,69 @@ static void coverage_gaps(void) {
     begin(c);
     HalCSpindleStatus ss;
     CHECK(hal_rt_spindle_read_status(c, 3, &ss) == 0 && ss.enabled && ss.mode == HAL_SPINDLE_CSV);
-    CHECK(hal_rt_axis_write_pos(c, 3, 0.0) == HAL_ERROR_NOT_RUNNING);
+    CHECK(hal_rt_axis_write_pos(c, 3, 0.0) == HAL_ERROR_MODE_MISMATCH);
+    CHECK(hal_rt_commit_cycle(c) == 0);
+    hal_context_destroy(c);
+}
+
+/* 主轴定向：厂商控制字 + 状态字完成位。 */
+static void spindle_orient(void) {
+    HalCConfig cfg = config(); HalContext* c = create(&cfg);
+    CHECK(hal_context_start(c, NULL, 0) == 0);
+    CHECK(hal_rt_spindle_enable(c, 3, 1) == 0);
+    for (int i = 0; i < 5; ++i) cycle(c);
+
+    /* 还没请求时是 NONE；定向期间主轴的伺服在索引 0。 */
+    int32_t os = -1;
+    begin(c);
+    CHECK(hal_rt_spindle_orient_state(c, 3, &os) == 0 && os == HAL_ORIENT_NONE);
+    CHECK(hal_rt_spindle_request_orient(c, 3) == 0);
+    CHECK(hal_rt_spindle_orient_state(c, 3, &os) == 0 && os == HAL_ORIENT_RUNNING);
+    /* 控制字要到 commit 才下发（HAL 的周期契约：write 只暂存）。 */
+    CHECK(hal_rt_commit_cycle(c) == 0);
+    CHECK(servo[0][DEV_DICT_ROLE_CONTROL_WORD] == 0x040Fu);
+    CHECK(servo[0][DEV_DICT_ROLE_TARGET_SPEED] == 0u);
+
+    /* 驱动器报完成位 → DONE，且**继续发控制字**保持对准。 */
+    servo[0][DEV_DICT_ROLE_STATUS_WORD] = 0x0437u;
+    begin(c);
+    CHECK(hal_rt_spindle_orient_state(c, 3, &os) == 0 && os == HAL_ORIENT_DONE);
+    CHECK(hal_rt_commit_cycle(c) == 0);
+    CHECK(servo[0][DEV_DICT_ROLE_CONTROL_WORD] == 0x040Fu);
+
+    /* 释放：状态回 NONE，控制字不再被定向机制接管。
+     * 断言"回到 DS402 标准值"而不是某个具体值——后者要跟着桩的状态机细节走，
+     * 太脆。这里要证的只是"厂商控制字已经被撤销"。 */
+    servo[0][DEV_DICT_ROLE_STATUS_WORD] = 0x0023u;
+    cycle(c);
+    begin(c);
+    CHECK(hal_rt_spindle_release_orient(c, 3) == 0);
+    CHECK(hal_rt_spindle_orient_state(c, 3, &os) == 0 && os == HAL_ORIENT_NONE);
+    CHECK(hal_rt_commit_cycle(c) == 0);
+    {
+        const uint32_t cw = servo[0][DEV_DICT_ROLE_CONTROL_WORD];
+        CHECK(cw == 0u || cw == 6u || cw == 7u || cw == 15u);
+    }
+    hal_context_destroy(c);
+
+    /* 没配定向控制字的轴必须明确拒绝，不能静默当成成功。 */
+    cfg = config();
+    cfg.spindles[0].axis.vendor_orient_control_word = 0;
+    cfg.spindles[0].axis.vendor_orient_done_mask = 0;
+    c = create(&cfg);
+    CHECK(hal_context_start(c, NULL, 0) == 0);
+    CHECK(hal_rt_spindle_enable(c, 3, 1) == 0);
+    for (int i = 0; i < 5; ++i) cycle(c);
+    begin(c);
+    CHECK(hal_rt_spindle_request_orient(c, 3) == HAL_ERROR_UNSUPPORTED);
+    CHECK(hal_rt_commit_cycle(c) == 0);
+    hal_context_destroy(c);
+
+    /* 进给轴不是主轴：同样的调用必须被拒。 */
+    cfg = config(); c = create(&cfg);
+    CHECK(hal_context_start(c, NULL, 0) == 0);
+    begin(c);
+    CHECK(hal_rt_spindle_request_orient(c, 7) == HAL_ERROR_ARGUMENT);
     CHECK(hal_rt_commit_cycle(c) == 0);
     hal_context_destroy(c);
 }
@@ -1086,5 +1151,6 @@ int main(void) {
     preset_overflow_probe(); spindle_origin_angle(); angle_regressions();
     fault_reset_and_bus_health(); io_image_size(); review_regressions();
     voltage_stop_priority(); standard_enabled_status(); coverage_gaps();
+    spindle_orient();
     printf("context_regression: %u checks passed\n", checks);
 }
