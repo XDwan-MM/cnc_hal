@@ -531,7 +531,7 @@ static int spindle_angle_case(Runner* r) {
     }
     if (prompt("主轴已在 CSP 使能且静止；输入 YES 下发目标角度")) goto failed;
     if (begin_tick(r)) goto failed;
-    int rc = hal_rt_axis_write_pos(r->ctx, spindle_axis(r), s->angle_target);
+    int rc = hal_rt_spindle_write_pos(r->ctx, spindle_axis(r), s->angle_target);
     double expected = 0.0;
     if (!rc) {
         /* 写接口只暂存目标：同一拍读取真正生成的累计目标，再决定是否提交。 */
@@ -551,7 +551,7 @@ static int spindle_angle_case(Runner* r) {
     /* 超限先取消暂存位置，再提交停机指令，不能把超限目标发送到驱动器。 */
     if (rc) (void)hal_rt_axis_estop(r->ctx, spindle_axis(r));
     int committed = end_tick(r);
-    if (call("hal_rt_axis_write_pos/angle limit", rc) || committed) goto failed;
+    if (call("hal_rt_spindle_write_pos/angle limit", rc) || committed) goto failed;
     for (unsigned i = 0; i < r->settings->settle_cycles; ++i) {
         if (spindle_snapshot(r, &state)) goto failed;
         printf("SPINDLE angle=%.6f expected=%.6f mode=%d sw=0x%04x\n",

@@ -304,6 +304,27 @@ int32_t hal_rt_axis_readiness(HalContext* c, HalAxisId id, uint32_t* out);
 int32_t hal_rt_spindle_request_mode(HalContext* c, HalAxisId id, HalSpindleMode mode);
 
 /**
+ * @brief 在 CSP 模式下下发相对既定零点的主轴单圈刻度（度）
+ *
+ * 对“上电位置为 0°”的主轴，调用方应在启动后首次采样成功且尚未运动时，
+ * 调用 hal_rt_axis_set_pos(c, id, 0) 建立本次运行的零点；不依赖驱动器
+ * 是否已经把原始位置 PDO 清零。
+ * 普通目标位于 [-360, 360]：正数沿正向、负数沿反向到达该刻度；0
+ * 取最近的零刻度。方向从上一条已受理目标计算，切入 CSP 时该目标预置为
+ * 当前位置；取消运动后再次就绪时也从当时反馈重建基准。连续重复普通目标
+ * 不会再转一圈（设零或通用累计位置写入会重置重复判定）；+360/-360 是分别正转/反转
+ * 完整一圈的命令，重复调用会重复转圈。
+ * 此接口不生成运动轨迹；速度和加速度控制由上层负责。受理条件同
+ * hal_rt_axis_write_pos。
+ *
+ * @param c   已 start 的 context
+ * @param id  逻辑轴号，且必须是主轴
+ * @param deg 相对既定零点的刻度（度），范围 [-360, 360]；符号指定方向
+ * @return int32_t 0 = 成功；其余见文件头
+ */
+int32_t hal_rt_spindle_write_pos(HalContext* c, HalAxisId id, double deg);
+
+/**
  * @brief 把本拍采到的输入映像拷到调用方的 PLC X 区
  *
  * 普通 IO 与面板共用同一块映像，各段按配置的 X 起始地址落位：段内覆盖，段外补 0，

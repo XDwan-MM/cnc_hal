@@ -33,7 +33,9 @@ typedef struct {
     int reset_high_next;     /* 先低后高，Fault 未消失时交替形成新边沿 */
     uint64_t stop_cycle;     /* 本拍显式停止优先于复位；历史停止不阻挡后续清错 */
 
-    int angle_base_valid; /* 主轴取消运动后，在再次就绪时用反馈重建命令侧基准 */
+    int angle_base_valid; /* 主轴取消运动后，在再次就绪时用反馈重建刻度基准 */
+    int angle_valid;      /* 上次受理的是普通刻度；避免浮点取模把重复命令变成整圈 */
+    double angle_command; /* 上次受理的普通刻度原值（保留方向符号） */
 
     int orient_state;   /* HAL_ORIENT_*：主轴定向进展；非 NONE 时暂停普通 DS402 推进 */
 
@@ -659,12 +661,14 @@ int32_t hal_rt_begin_cycle(HalContext* c) {
             if (override_preset[i] &&
                 Master_ServoWrite(a->slot, DEV_DICT_ROLE_TARGET_POS, presets[i])) return bus_error(c);
             a->status.command_pos = a->status.actual_pos;
+            a->angle_valid = 0;
         }
         if (a->request == DS402_REQ_ENABLE) a->stop_override = 0;
         a->motion_ready = a->request == DS402_REQ_ENABLE && planned[i].kind == DS402_STEP_DONE;
         if (a->spindle && a->motion_ready && !a->angle_base_valid) {
             a->status.command_pos = a->status.actual_pos;
             a->angle_base_valid = 1;
+            a->angle_valid = 0;
         }
     }
     for (int i = 0; i < c->io_count; ++i) {
@@ -726,7 +730,7 @@ int32_t hal_rt_commit_cycle(HalContext* c) {
 /* 取消尚未提交的运动：丢脏标志、清速度目标、撤销 motion_ready。
  * 只动 HAL 侧的暂存，驱动器下一拍才会因为速度目标变 0 而减速。 */
 static void cancel_motion(Axis* a) {
-    a->angle_base_valid = 0;
+    a->angle_base_valid = a->angle_valid = 0;
     a->pos_dirty = a->speed_dirty = 0;
     a->motion_ready = 0;
     a->zero_speed = 1;
@@ -820,6 +824,7 @@ int32_t hal_rt_axis_write_pos(HalContext* c, HalAxisId id, double pos) {
     }
     if (rc) return rc;
     a->pos_dirty = 1;
+    a->angle_valid = 0; /* 通用累计位置命令取代刻度命令。 */
     a->status.command_pos = pos;
     return HAL_OK;
 }
@@ -845,6 +850,7 @@ int32_t hal_rt_axis_set_pos(HalContext* c, HalAxisId id, double pos) {
     const double delta = pos - a->status.actual_pos;
     if (!isfinite(delta) || !isfinite(a->feedback_offset + delta) ||
         !isfinite(a->command_offset + delta) || !isfinite(a->status.command_pos + delta)) return HAL_ERROR_ARGUMENT;
+    a->angle_valid = 0; /* 设零后旧刻度不再属于当前坐标系。 */
     a->feedback_offset += delta;
     a->command_offset += delta;
     a->status.actual_pos = pos;
@@ -961,6 +967,41 @@ int32_t hal_rt_spindle_read_status(HalContext* c, HalAxisId id, HalCSpindleStatu
     return HAL_OK;
 }
 
+
+/* 普通值是相对既定零点的单圈刻度，符号指定到达方向。
+ * 以已受理目标为基准，重复同一普通刻度不会意外再转一圈。 */
+int32_t hal_rt_spindle_write_pos(HalContext* c, HalAxisId id, double deg) {
+    const int rc = spindle_gate(c, id);
+    if (rc) return rc;
+    if (!isfinite(deg) || deg < -360.0 || deg > 360.0) return HAL_ERROR_ARGUMENT;
+    Axis* a = find_axis(c, id);
+    if (c->phase != 2 || !a->sampled) return HAL_ERROR_NOT_RUNNING;
+    const double base = a->status.command_pos;
+    double delta;
+    if (a->angle_valid && deg == a->angle_command) {
+        delta = 0.0;
+    } else if (deg == 360.0 || deg == -360.0) {
+        delta = deg;
+    } else {
+        const double current_phase = fmod(fmod(base, 360.0) + 360.0, 360.0);
+        const double target_phase = fmod(fmod(deg, 360.0) + 360.0, 360.0);
+        delta = target_phase - current_phase;
+        if (deg > 0.0 && delta < 0.0) delta += 360.0;
+        else if (deg < 0.0 && delta > 0.0) delta -= 360.0;
+        else if (deg == 0.0) {
+            if (delta > 180.0) delta -= 360.0;
+            else if (delta < -180.0) delta += 360.0;
+        }
+    }
+    const double target = base + delta;
+    if (!isfinite(target)) return HAL_ERROR_ARGUMENT;
+    const int result = hal_rt_axis_write_pos(c, id, target);
+    if (!result) {
+        a->angle_valid = deg != 360.0 && deg != -360.0;
+        a->angle_command = deg;
+    }
+    return result;
+}
 
 /* 把本拍输入映像拷到调用方的 X 区：段内覆盖、段外补 0，调用方不必先清。
  * len < x_size 直接报错——映像不够长说明调用方和 HAL 对地址域的理解不一致。 */

@@ -21,14 +21,15 @@
 #include <stdint.h>
 
 /* 7.0：删掉几处**不属于 HAL 职责**或纯转发的东西。
- *      - hal_rt_spindle_write_pos：单圈刻度 + "按符号补一圈"是主轴定位的机床语义，
- *        归上层；通用目标位置已经由 hal_rt_axis_write_pos 表达（它本来也收主轴）。
  *      - hal_rt_spindle_enable / hal_rt_spindle_estop / hal_rt_axis_read_pos /
  *        hal_rt_spindle_read_speed：都是 hal_rt_axis_* / read_status 的纯转发，
  *        留着让人以为有两条路。轴状态与主轴状态里本来就有位置和转速。
  *      - HalCSpindleCfg.accel（HAL 不生成加减速曲线，纯占位）、speed_window、
  *        HalCSpindleStatus.at_speed（"到速"是上层 M 代码握手判据，且上层自己算）。
  *      删函数按本文件的策略是 MAJOR。
+ *
+ *      **hal_rt_spindle_write_pos 保留**：主轴单圈刻度下发是与 RT 侧约定好的接口，
+ *      不属于"越界"，不删。（曾在本版改动里误删，随后原样恢复。）
  * 6.0：新增主轴定向三个函数 + HalCAxisCfg 的 vendor_orient_control_word /
  *      vendor_orient_done_mask 两个字段。函数增按本文件的策略是 MAJOR。
  * 5.1：HalCAxisStatus 增 actual_speed / speed_valid —— 进给轴也要能读到实际速度。

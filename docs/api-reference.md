@@ -6,13 +6,12 @@
 > 同日二次审查已修正使能状态掩码和撤销电压停止优先级；最新结果与 RT 候选接入验证见
 > [HAL 二次审查与 RT 接入准备](review/2026-10-04-HAL二次审查与RT接入准备.md)。
 > **7.0 相对 6.0 的变化**：删掉几处不属于 HAL 职责或纯转发的接口与字段。
-> 删除的函数：`hal_rt_spindle_write_pos()`（单圈刻度 + "按符号补一圈"是主轴定位的
-> 机床语义，归上层；通用目标位置由 `hal_rt_axis_write_pos()` 表达，它本来就收主轴）、
-> `hal_rt_spindle_enable()` / `hal_rt_spindle_estop()` / `hal_rt_axis_read_pos()` /
+> 删除的函数：`hal_rt_spindle_enable()` / `hal_rt_spindle_estop()` / `hal_rt_axis_read_pos()` /
 > `hal_rt_spindle_read_speed()`（都是 `hal_rt_axis_*` / `read_status` 的纯转发）。
 > 删除的字段：`HalCSpindleCfg.accel`、`HalCSpindleCfg.speed_window`、
 > `HalCSpindleStatus.at_speed`（"到速"是上层 M 代码握手判据，且上层自己算）。
 > 另：`hal_rt_spindle_release_orient()` 不再替上层把轴重新使能。
+> **`hal_rt_spindle_write_pos()` 保留** —— 主轴单圈刻度下发是与 RT 侧约定好的接口。
 >
 > **5.0 相对 4.0 的变化**：新增 `hal_io_image_size()`。函数增删按本工程的版本策略属
 > MAJOR，消费者须重编。
@@ -1371,6 +1370,47 @@ if (hal_rt_spindle_read_status(ctx, spindle, &st) == HAL_OK) {
 - 反馈角度可以跨多圈累计；相同计数坐标系下的位置命令以本拍原始反馈计数加有符号位移生成目标位型。驱动器在 32 位边界的实际转向仍须现场确认。
 - `mode` 来自驱动器反馈，可能与 `request_mode` 的期望值暂时不一致。
 - HAL 不生成运动轨迹，也不做速度／转矩限幅。
+
+#### 4.3.4 主轴角度下发函数hal_rt_spindle_write_pos()
+
+**函数原型**
+
+```c
+int32_t hal_rt_spindle_write_pos(HalContext *c, HalAxisId id, double deg);
+```
+
+**函数功能**
+
+在 CSP 模式下下发相对既定零点的主轴单圈刻度（度）。对于“上电位置为 0°”的主轴，调用方在启动后首次采样成功、主轴尚未运动时调用一次 `hal_rt_axis_set_pos(ctx, spindle, 0)`；此操作不改编码器值，也不要求先找 Z 相。之后切 CSV/CSP 不改变该零点。正数沿正向、负数沿反向到达指定刻度；0 取最近的零刻度。方向从上一条已受理目标计算，切入 CSP 时该目标预置为当前位置；取消运动后再次就绪时，从当时反馈重建计算基准。连续重复相同普通刻度（包括小数）保留原累计目标；设零或调用通用累计位置写入接口会清除这一重复判定。`+360`/`-360` 是分别完整正转/反转一圈的特殊命令。
+
+主轴必须在配置里带有效逻辑轴号（`logical_axis >= 0`）。这个接口不表达累计多圈目标；需要连续多圈轨迹的功能必须另定接口契约。
+
+**函数参数及返回值**
+
+| 参数名 | 类型 | 说明 |
+| ------ | ---- | ---- |
+| c | `HalContext*` | 已 `start` 的 context |
+| id | `HalAxisId` | 逻辑轴号，**且必须是主轴** |
+| deg | `double` | 相对既定零点的刻度，范围 [-360, 360]；符号指定到达方向，±360 为单次完整转一圈 |
+| 返回值 | `int32_t` | `HAL_OK`；`HAL_ERROR_ARGUMENT` = 不是主轴；`HAL_ERROR_NOT_RUNNING` = 受理条件不满足 |
+
+**示例用法**
+
+```c
+/* 从零点正转到 +10° 刻度；等待该命令完成 */
+hal_rt_spindle_write_pos(ctx, spindle, 10.0);
+/* 下一条命令：继续正转 355° 到下一圈的 +5° 刻度 */
+hal_rt_spindle_write_pos(ctx, spindle, 5.0);
+/* 另一条独立命令，只调用一次：从上一目标正转完整一圈 */
+hal_rt_spindle_write_pos(ctx, spindle, 360.0);
+```
+
+**注意**
+
+- `+5°` 表示沿正向到零点的 +5° 刻度，`-5°` 表示沿反向到零点的 -5° 刻度。两者不能按最短路径互换。重复普通目标不会再转一圈；重复 ±360 会再次请求完整一圈。
+- **受理条件同 `hal_rt_axis_write_pos()`**：本拍已 `begin` 且未 `commit`、已使能、状态机到位、**模式确为 CSP**。
+- 同一计数坐标系下，位置下发以本拍原始反馈计数加有符号位移形成 32 位目标位型；实际驱动器跨界运动方向须现场验证。命令/反馈计数坐标不同时仍走原有绝对计数换算，超出 int32 会返回参数错误。
+- 主轴必须配置 `logical_axis >= 0`，不能用 `-1`（"纯主轴"）—— 否则无法经轴号寻址。
 
 ### 4.4 IO 与面板
 
