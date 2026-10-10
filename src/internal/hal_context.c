@@ -38,6 +38,7 @@ typedef struct {
     double angle_command; /* 上次受理的普通刻度原值（保留方向符号） */
 
     int orient_state;   /* HAL_ORIENT_*：主轴定向进展；非 NONE 时暂停普通 DS402 推进 */
+    uint32_t orient_delay_left; /* 发控制字后的等待期还剩几拍；此间不采完成位 */
 
     int pos_dirty;      /* 有未下发的目标位置，commit 时写 0x607A */
     int speed_dirty;    /* 有未下发的目标速度，commit 时写 0x60FF */
@@ -639,9 +640,11 @@ int32_t hal_rt_begin_cycle(HalContext* c) {
          * 完成位在状态字上——定完置 DONE 但**继续发控制字**，保持对准直到 release。 */
         if (a->spindle && a->orient_state != HAL_ORIENT_NONE) {
             const uint16_t omask = a->cfg.vendor_orient_done_mask;
-            if (a->orient_state == HAL_ORIENT_RUNNING && omask &&
-                (a->status.raw_status & omask))
-                a->orient_state = HAL_ORIENT_DONE;
+            if (a->orient_state == HAL_ORIENT_RUNNING && omask) {
+                /* 等待期内不看完成位：那几拍它可能还是别的含义（见 vendor_orient_delay_ms）。 */
+                if (a->orient_delay_left) --a->orient_delay_left;
+                else if (a->status.raw_status & omask) a->orient_state = HAL_ORIENT_DONE;
+            }
         }
         if (reset_control[i]) {
             /* 低电平先发送，第一次高电平才开始计超时；终态也必须释放 bit7。
@@ -990,6 +993,15 @@ int32_t hal_rt_spindle_request_orient(HalContext* c, HalAxisId id) {
     if (c->phase != 2) return HAL_ERROR_NOT_RUNNING;
     if (!a->status.enabled) return HAL_ERROR_NOT_ENABLED;
     a->orient_state = HAL_ORIENT_RUNNING;
+    /* 发控制字后的等待期（拍）。手册给的时序：先等够，完成位才是本模式下的含义。
+     * 按时长算成拍数、向上取整（宁可多等一拍）。cycle_us 为 0 时按 0 处理，不除零。 */
+    {
+        const int32_t ms = a->cfg.vendor_orient_delay_ms > 0 ? a->cfg.vendor_orient_delay_ms : 0;
+        const uint32_t us = (uint32_t)ms * 1000u;
+        a->orient_delay_left = (us && c->config.cycle_us)
+                                   ? (us + c->config.cycle_us - 1u) / c->config.cycle_us
+                                   : 0u;
+    }
     return HAL_OK;
 }
 

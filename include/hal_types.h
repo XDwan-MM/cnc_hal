@@ -26,7 +26,7 @@
 #include <stdint.h>
 
 #define HAL_C_ABI_MAJOR  7u     /* 契约/语义版本：函数增删、返回码含义变 */
-#define HAL_C_ABI_MINOR  0u     /* 结构布局版本：字段增删改序 */
+#define HAL_C_ABI_MINOR  1u     /* 结构布局版本：字段增删改序（0→1：HalCAxisCfg 加 vendor_orient_delay_ms）*/
 
 /* ---- HAL 发行版本 ---- */
 #define HAL_VERSION_MAJOR  0u       /* 主版本 */
@@ -116,6 +116,11 @@ typedef struct {
      * 进给轴保持 0 即可。 */
     uint16_t vendor_orient_control_word; /* 如 0x040F */
     uint16_t vendor_orient_done_mask;    /* 如 0x0400（状态字 bit10） */
+    int32_t  vendor_orient_delay_ms;     /* 发出控制字后先等这么久（ms）再采完成位；<= 0 = 不等。
+                                          * 为什么要等：完成位在别的模式下可能是**别的含义**。例：
+                                          * 蓝海华腾 VTS 手册（附录 C）——6041h.bit10 在 CSV 模式下
+                                          * 表示"速度到达"，发 0x40F 后延时 10ms 才表示"定位完成"。
+                                          * 不等就可能把"主轴已经在转"当成"已经定向完"。 */
 } HalCAxisCfg;
 
 /* 主轴 —— 在通用轴属性之上加转速上限。

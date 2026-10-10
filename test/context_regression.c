@@ -1086,6 +1086,42 @@ static void coverage_gaps(void) {
     hal_context_destroy(c);
 }
 
+/* 定向：发控制字后要**先等够**再采完成位。
+ *
+ * 为什么必须等：完成位在别的模式下可能是别的含义。蓝海华腾 VTS 手册附录 C 写着
+ * 6041h.bit10 在 CSV 模式下表示"速度达到设定转速"，发 0x40F 后延时 10ms 才表示
+ * "定位完成"。不等的话主轴正常转到速时 bit10 本来就是 1 → 一请求就判 DONE，
+ * M19 看起来"秒完成"，其实驱动器还没开始定位。 */
+static void spindle_orient_delay(void) {
+    HalCConfig cfg = config();
+    cfg.spindles[0].axis.vendor_orient_delay_ms = 5;   /* 周期 1ms → 等 5 拍 */
+    HalContext* c = create(&cfg);
+    CHECK(hal_context_start(c, NULL, 0) == 0);
+    CHECK(hal_rt_spindle_enable(c, 3, 1) == 0);
+    for (int i = 0; i < 5; ++i) cycle(c);
+
+    /* 驱动器把完成位**先**报成 1（CSV 到速就是这个位）——不能立刻判 DONE。 */
+    servo[0][DEV_DICT_ROLE_STATUS_WORD] = 0x0437u;
+    begin(c);
+    CHECK(hal_rt_spindle_request_orient(c, 3) == 0);
+    int32_t os = -1;
+    CHECK(hal_rt_spindle_orient_state(c, 3, &os) == 0 && os == HAL_ORIENT_RUNNING);
+    CHECK(hal_rt_commit_cycle(c) == 0);
+
+    /* 等待期内：完成位已经是 1，仍必须是 RUNNING */
+    cycle(c);
+    begin(c);
+    CHECK(hal_rt_spindle_orient_state(c, 3, &os) == 0 && os == HAL_ORIENT_RUNNING);
+    CHECK(hal_rt_commit_cycle(c) == 0);
+
+    /* 等够之后才认 */
+    for (int i = 0; i < 6; ++i) cycle(c);
+    begin(c);
+    CHECK(hal_rt_spindle_orient_state(c, 3, &os) == 0 && os == HAL_ORIENT_DONE);
+    CHECK(hal_rt_commit_cycle(c) == 0);
+    hal_context_destroy(c);
+}
+
 /* 主轴定向：厂商控制字 + 状态字完成位。 */
 static void spindle_orient(void) {
     HalCConfig cfg = config(); HalContext* c = create(&cfg);
@@ -1278,6 +1314,6 @@ int main(void) {
     pdo_width_policy();
     fault_reset_and_bus_health(); io_image_size(); review_regressions();
     voltage_stop_priority(); standard_enabled_status(); coverage_gaps();
-    spindle_orient(); orient_release_keeps_enable_intent(); axis_readiness();
+    spindle_orient(); spindle_orient_delay(); orient_release_keeps_enable_intent(); axis_readiness();
     printf("context_regression: %u checks passed\n", checks);
 }
