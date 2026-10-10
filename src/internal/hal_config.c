@@ -53,7 +53,8 @@ int32_t hal_config_validate(const HalCConfig* c, char* err, uint32_t len) {
          *   1. 从站号、轴序号、逻辑轴号的范围；
          *   2. 主轴必须占一个逻辑轴号（-1 只允许进给轴）；
          *   3. 急停动作、工作模式、编码器类型、模循环必须是合法枚举；
-         *   4. 两个当量与坐标偏置必须是正的有限值。 */
+         *   4. 两个当量与坐标偏置必须是正的有限值；
+         *   5. 速度单位得是合法枚举，填 pulse/s 时必须给每转指令脉冲数。 */
         if (a->slave_pos < 0 || a->slave_pos >= (int)HAL_C_MAX_DEV || a->axis_index < 0 ||
             a->logical_axis < -1 || a->logical_axis >= 32 ||
             (i >= c->axis_count && a->logical_axis < 0) ||
@@ -62,11 +63,13 @@ int32_t hal_config_validate(const HalCConfig* c, char* err, uint32_t len) {
             (i < c->axis_count && a->work_mode != HAL_WORK_POSITION) ||   /* 进给轴强制位置模式；主轴可配速度 */
             (a->encoder_type != HAL_ENC_INCREMENTAL_Z && a->encoder_type != HAL_ENC_ABSOLUTE) ||
             a->feedback_pulses_per_rev <= 0 ||
+            (a->speed_unit != HAL_SPEED_RPM && a->speed_unit != HAL_SPEED_PULSES_PER_S) ||
+            (a->speed_unit == HAL_SPEED_PULSES_PER_S && a->command_pulses_per_rev <= 0) ||
             (a->feedback_wrap != HAL_WRAP_LINEAR && a->feedback_wrap != HAL_WRAP_MODULAR) ||
             !isfinite(a->command_units_per_count) || a->command_units_per_count <= 0 ||
             !isfinite(a->feedback_units_per_count) || a->feedback_units_per_count <= 0 ||
             !isfinite(a->enc_off))
-            return fail(err, len, HAL_ERROR_CONFIG, "轴绑定、急停动作或换算参数无效");
+            return fail(err, len, HAL_ERROR_CONFIG, "轴绑定、急停动作、速度单位或换算参数无效");
         /* 物理绑定与逻辑轴号都不能和前面任一轴重复。逻辑轴号 -1 表示不占轴槽，不参与去重。 */
         for (int j = 0; j < i; ++j) {
             const HalCAxisCfg* b = axis_at(c, j);

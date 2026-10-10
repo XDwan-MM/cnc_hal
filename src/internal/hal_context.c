@@ -595,14 +595,22 @@ static int sample_axis(Axis* a) {
     a->speed.enabled = a->status.enabled;
     a->speed.raw_status = (uint16_t)sw;
     a->speed.position_deg = a->status.actual_pos;
-    /* 速度 PDO 的单位假定为 rpm，不做任何当量换算——直接就是转速*/
-    a->speed.actual_speed = a->has_speed ?
+    /* 速度对象的**原始**读数：单位是驱动器自己的（0x606C），HAL 不猜。 */
+    const double raw_speed = a->has_speed ?
         signed32(velocity) * (a->cfg.feedback_invert ? -1 : 1) : 0;
-    /* 轴状态里给**同一份**读数：进给轴拿不到 spindle 那个出参（它要求主轴），而实际
-     * 速度是进给率显示要用的。两者必须同源，别让它们各算一遍漂开。 */
-    a->status.actual_speed = a->speed.actual_speed;
+    /* 换算成 rpm：pulse/s 用每转指令脉冲数折算，rpm 原样。除数为 0 的组合在配置校验里
+     * 就被拒了，走不到这里。 */
+    const double speed_rpm = (a->cfg.speed_unit == HAL_SPEED_PULSES_PER_S)
+        ? raw_speed * 60.0 / (double)a->cfg.command_pulses_per_rev
+        : raw_speed;
+    /* 主轴那份出参给 rpm（"停稳"判据要用它）；轴状态给**原始值** + rpm 两个口径。
+     * 两条都出自同一份 raw_speed，不会各算一遍漂开。进给轴拿不到 spindle 那个出参
+     * （它要求主轴），所以轴状态里那份才是进给率显示用的。 */
+    a->speed.actual_speed = speed_rpm;
+    a->status.actual_speed = raw_speed;
+    a->status.actual_speed_rpm = speed_rpm;
     a->status.speed_valid = a->has_speed;
-    if (!isfinite(a->status.actual_pos) || !isfinite(a->speed.actual_speed)) return HAL_ERROR_BUS;
+    if (!isfinite(a->status.actual_pos) || !isfinite(speed_rpm)) return HAL_ERROR_BUS;
     return HAL_OK;
 }
 
@@ -942,9 +950,13 @@ int32_t hal_rt_spindle_write_speed(HalContext* c, HalAxisId id, double rpm, int3
     if (c->phase != 2) return HAL_ERROR_NOT_RUNNING;
     if (!a->motion_ready || !a->status.enabled) return HAL_ERROR_NOT_ENABLED;
     if (a->desired_mode != DS402_MODE_CSV || a->mode != DS402_MODE_CSV) return HAL_ERROR_MODE_MISMATCH;
-    /* 与读侧同一约定：速度 PDO 就是 rpm，不做当量换算。
-     * to_counts 会四舍五入到整数——驱动器速度单位若比 1 rpm 更细，精度在这里丢失。 */
-    rc = to_counts(rpm * dir * (a->cfg.command_invert ? -1 : 1), &a->speed_command);
+    /* 读侧同一约定：**对外永远是 rpm**，写下去之前按该轴 speed_unit 折成驱动器单位
+     * （pulse/s = rpm / 60 × 每转指令脉冲数）。
+     * to_counts 会四舍五入到整数——驱动器速度单位若比 1 更细，精度在这里丢失。 */
+    const double drive_speed = (a->cfg.speed_unit == HAL_SPEED_PULSES_PER_S)
+        ? rpm * (double)a->cfg.command_pulses_per_rev / 60.0
+        : rpm;
+    rc = to_counts(drive_speed * dir * (a->cfg.command_invert ? -1 : 1), &a->speed_command);
     if (rc) return rc;
     a->speed_dirty = 1;
     a->speed.command_speed = rpm * dir;

@@ -1122,6 +1122,52 @@ static void spindle_orient_delay(void) {
     hal_context_destroy(c);
 }
 
+/* 速度单位：驱动器是 pulse/s 时，对外仍然全是 rpm。
+ *
+ * 蓝海华腾 VTS 的 C2-00 出厂默认就是 pulse/s：不换算的话，写"300 rpm"会变成
+ * 300 脉冲/秒（主轴几乎不转），而"停稳"判据（转速<5）永远不成立。 */
+static void speed_unit_pulses_per_second(void) {
+    HalCConfig cfg = config();
+    cfg.spindles[0].axis.speed_unit = HAL_SPEED_PULSES_PER_S;
+    cfg.spindles[0].axis.command_pulses_per_rev = 10000;   /* 每转 1 万脉冲 */
+    HalContext* c = create(&cfg);
+    CHECK(hal_context_start(c, NULL, 0) == 0); enable(c);
+
+    /* 读：50000 脉冲/秒 = 300 rpm */
+    servo[0][DEV_DICT_ROLE_ACTUAL_SPEED] = 50000;
+    begin(c);
+    double rpm = 0.0;
+    CHECK(hal_rt_spindle_read_speed(c, 3, &rpm) == 0 && rpm > 299.9 && rpm < 300.1);
+    HalCAxisStatus st;
+    CHECK(hal_rt_axis_read_status(c, 3, &st) == 0 && st.speed_valid);
+    CHECK(st.actual_speed == 50000);                                  /* 原始值保留 */
+    CHECK(st.actual_speed_rpm > 299.9 && st.actual_speed_rpm < 300.1);/* 换算后 */
+
+    /* 写：300 rpm = 300/60×10000 = 50000 脉冲/秒；对外读回来仍是 rpm */
+    CHECK(hal_rt_spindle_write_speed(c, 3, 300, 1) == 0);
+    HalCSpindleStatus ss;
+    CHECK(hal_rt_spindle_read_status(c, 3, &ss) == 0 && ss.command_speed == 300);
+    CHECK(hal_rt_commit_cycle(c) == 0);
+    CHECK(servo[0][DEV_DICT_ROLE_TARGET_SPEED] == 50000u);
+    hal_context_destroy(c);
+
+    /* 填 pulse/s 却不给每转脉冲数 → 配置直接拒，不按 1:1 静默走 */
+    cfg = config();
+    cfg.spindles[0].axis.speed_unit = HAL_SPEED_PULSES_PER_S;
+    cfg.spindles[0].axis.command_pulses_per_rev = 0;
+    {
+        HalContext* bad = NULL; char err[128];
+        CHECK(hal_context_create(&cfg, &bad, err, sizeof(err)) == HAL_ERROR_CONFIG && !bad);
+    }
+    /* 单位枚举非法也一样 */
+    cfg.spindles[0].axis.speed_unit = 7;
+    cfg.spindles[0].axis.command_pulses_per_rev = 10000;
+    {
+        HalContext* bad = NULL; char err[128];
+        CHECK(hal_context_create(&cfg, &bad, err, sizeof(err)) == HAL_ERROR_CONFIG && !bad);
+    }
+}
+
 /* 主轴定向：厂商控制字 + 状态字完成位。 */
 static void spindle_orient(void) {
     HalCConfig cfg = config(); HalContext* c = create(&cfg);
@@ -1314,6 +1360,7 @@ int main(void) {
     pdo_width_policy();
     fault_reset_and_bus_health(); io_image_size(); review_regressions();
     voltage_stop_priority(); standard_enabled_status(); coverage_gaps();
-    spindle_orient(); spindle_orient_delay(); orient_release_keeps_enable_intent(); axis_readiness();
+    spindle_orient(); spindle_orient_delay(); speed_unit_pulses_per_second();
+    orient_release_keeps_enable_intent(); axis_readiness();
     printf("context_regression: %u checks passed\n", checks);
 }
