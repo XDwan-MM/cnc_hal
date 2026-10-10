@@ -106,8 +106,10 @@ int32_t hal_rt_axis_read_pos(HalContext* c, HalAxisId id, double* pos);
  * 要重新运动必须显式 hal_rt_axis_enable()，且要再经一次 begin 确认状态机到位。
  * 这是有意的：驱动器刚从故障恢复时自动上使能是危险的。
  *
- * 重复调用刷新请求：从低电平准备阶段重新开始，首次高电平拍重新计超时；
- * 刷新请求不能代替查询 hal_rt_axis_fault_reset_state()。
+ * 重复调用刷新请求：从低电平准备阶段重新开始，首次高电平拍重新计超时。
+ * **别拿它当轮询**：每拍重发就等于每拍把超时预算归零，本次复位永远不会超时、
+ * 状态永远停在 PENDING —— 靠它收口的上层会一直等下去。要看进展请查
+ * hal_rt_axis_fault_reset_state()，不要重发请求。
  * 急停/去使能优先：同拍已有停止请求时返回 HAL_ERROR_STATE；复位期间的停止
  * 取消复位，状态回到 HAL_RESET_NONE。后续拍可显式请求复位，仍不会自动使能。
  * 后续拍受理复位会清除此前急停/去使能的停止动作覆盖（stop_override）。
