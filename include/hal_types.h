@@ -16,12 +16,18 @@
  *   MINOR —— 结构布局变更（字段增删改序）
  * 真正的闸门是**两个都要对**：abi_major（+ abi_minor）与 struct_size **精确相等**。
  * struct_size 用精确相等而不是"至少"——它是唯一能挡住字段插入的检查。
+ *
+ * **改这两个宏要同步改下游**：RT 侧 `port_work/src/hal/rt_hal_config.c` 有一道编译期
+ * 闸门（#error）盯着这两个值，不同步改就编译不过。那是故意的：出参结构体
+ * （如 HalCAxisStatus）没有 struct_size 可查，HAL 只给它加字段时运行期校验查不出来，
+ * 而下游按旧布局开的缓冲会被写坏。
  * ========================================================================== */
 
 #include <stdint.h>
 
 #define HAL_C_ABI_MAJOR  7u     /* 契约/语义版本：函数增删、返回码含义变 */
-#define HAL_C_ABI_MINOR  0u     /* 结构布局版本：字段增删改序 */
+#define HAL_C_ABI_MINOR  2u     /* 结构布局版本：字段增删改序（1→2：加 speed_unit /
+                                 * command_pulses_per_rev / actual_speed_rpm）*/
 
 /* ---- HAL 发行版本 ---- */
 #define HAL_VERSION_MAJOR  0u       /* 主版本 */
@@ -63,6 +69,15 @@ typedef struct {
 #define HAL_WORK_VELOCITY     3   /* 速度模式（CSV） */
 #define HAL_ENC_INCREMENTAL_Z 1   /* 增量式、带 Z 相；是否回零由机床策略决定 */
 #define HAL_ENC_ABSOLUTE      3   /* 绝对式 */
+
+/* 驱动器速度对象（0x606C 读 / 0x60FF 写）的单位。
+ * HAL 对外的速度口径**永远是 rpm**：
+ *   HAL_SPEED_RPM          —— 驱动器本身就是 rpm（蓝海华腾要把 C2-00 设成 0）；
+ *   HAL_SPEED_PULSES_PER_S —— 驱动器是脉冲/秒（蓝海华腾 C2-00 出厂默认就是这个），
+ *                             HAL 用 command_pulses_per_rev 双向换算。
+ * 不填就是 0（rpm）——与旧行为一致。 */
+#define HAL_SPEED_RPM           0
+#define HAL_SPEED_PULSES_PER_S  1
 #define HAL_WRAP_LINEAR       0   /* 线性计数 */
 #define HAL_WRAP_MODULAR      1   /* 模循环（主轴：模每转脉冲数） */
 
@@ -111,6 +126,18 @@ typedef struct {
      * 进给轴保持 0 即可。 */
     uint16_t vendor_orient_control_word; /* 如 0x040F */
     uint16_t vendor_orient_done_mask;    /* 如 0x0400（状态字 bit10） */
+    int32_t  vendor_orient_delay_ms;     /* 发出控制字后先等这么久（ms）再采完成位；<= 0 = 不等。
+                                          * 为什么要等：完成位在别的模式下可能是**别的含义**。例：
+                                          * 蓝海华腾 VTS 手册（附录 C）——6041h.bit10 在 CSV 模式下
+                                          * 表示"速度到达"，发 0x40F 后延时 10ms 才表示"定位完成"。
+                                          * 不等就可能把"主轴已经在转"当成"已经定向完"。 */
+
+    /* ---- 速度对象单位（驱动器专有）----
+     * 取值见 HAL_SPEED_*；默认 0（rpm），不填就是旧行为。
+     * 填 pulse/s 时**必须**同时给 command_pulses_per_rev，否则配置被拒（不猜）。 */
+    int32_t  speed_unit;                 /* 0 = rpm；1 = pulse/s */
+    int32_t  command_pulses_per_rev;     /* 每转指令脉冲数。只在 pulse/s 时用于换算：
+                                          * 写 rpm→pulse/s、读 pulse/s→rpm。 */
 } HalCAxisCfg;
 
 /* 主轴 —— 在通用轴属性之上加转速上限。
@@ -174,10 +201,12 @@ typedef struct {
                                            「可能不可信」写，将来真值出现时不用改。 */
     double   actual_pos;                /* 用户单位 */
     double   command_pos;               /* 用户单位 */
-    double   actual_speed;              /* 实际速度。单位是驱动器速度对象（0x606C）的单位，
-                                           HAL **不做任何换算**——口径见 hal_context.c
-                                           采样处那段说明。speed_valid 为 0 时它恒为 0，
-                                           此时"0"表示**不可得**，不是"静止"。 */
+    double   actual_speed;              /* 实际速度**原始值**：单位就是驱动器速度对象（0x606C）
+                                           的单位，HAL 不换算（诊断/按需取原始值用）。
+                                           speed_valid 为 0 时它恒为 0，此时"0"表示**不可得**，
+                                           不是"静止"。 */
+    double   actual_speed_rpm;          /* 同一份读数的 rpm 口径：按该轴 speed_unit 换算好，
+                                           显示与比较一律用这个。speed_valid 为 0 时无意义。 */
     int32_t  speed_valid;               /* 非零 = 该轴映射了速度 PDO（0x606C 与 0x60FF
                                            都是 32 位），actual_speed 才有意义。
                                            主轴上恒为 1——HAL 在 bind 阶段就拒绝
@@ -191,7 +220,8 @@ typedef struct {
     int32_t  enabled;
     int32_t  mode;                      /* HAL_SPINDLE_CSV / _CSP，来自 0x6061 */
     double   command_speed;             /* rpm，带符号：正=正转 M03，负=反转 M04 */
-    double   actual_speed;
+    double   actual_speed;              /* rpm（HAL 已按 speed_unit 换算）——
+                                           "停稳"判据（转速<5）用它，必须是 rpm */
     double   position_deg;              /* 累计转角（度）。HAL **不取模** */
     uint16_t raw_status;
 } HalCSpindleStatus;

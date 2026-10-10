@@ -1086,6 +1086,88 @@ static void coverage_gaps(void) {
     hal_context_destroy(c);
 }
 
+/* 定向：发控制字后要**先等够**再采完成位。
+ *
+ * 为什么必须等：完成位在别的模式下可能是别的含义。蓝海华腾 VTS 手册附录 C 写着
+ * 6041h.bit10 在 CSV 模式下表示"速度达到设定转速"，发 0x40F 后延时 10ms 才表示
+ * "定位完成"。不等的话主轴正常转到速时 bit10 本来就是 1 → 一请求就判 DONE，
+ * M19 看起来"秒完成"，其实驱动器还没开始定位。 */
+static void spindle_orient_delay(void) {
+    HalCConfig cfg = config();
+    cfg.spindles[0].axis.vendor_orient_delay_ms = 5;   /* 周期 1ms → 等 5 拍 */
+    HalContext* c = create(&cfg);
+    CHECK(hal_context_start(c, NULL, 0) == 0);
+    CHECK(hal_rt_spindle_enable(c, 3, 1) == 0);
+    for (int i = 0; i < 5; ++i) cycle(c);
+
+    /* 驱动器把完成位**先**报成 1（CSV 到速就是这个位）——不能立刻判 DONE。 */
+    servo[0][DEV_DICT_ROLE_STATUS_WORD] = 0x0437u;
+    begin(c);
+    CHECK(hal_rt_spindle_request_orient(c, 3) == 0);
+    int32_t os = -1;
+    CHECK(hal_rt_spindle_orient_state(c, 3, &os) == 0 && os == HAL_ORIENT_RUNNING);
+    CHECK(hal_rt_commit_cycle(c) == 0);
+
+    /* 等待期内：完成位已经是 1，仍必须是 RUNNING */
+    cycle(c);
+    begin(c);
+    CHECK(hal_rt_spindle_orient_state(c, 3, &os) == 0 && os == HAL_ORIENT_RUNNING);
+    CHECK(hal_rt_commit_cycle(c) == 0);
+
+    /* 等够之后才认 */
+    for (int i = 0; i < 6; ++i) cycle(c);
+    begin(c);
+    CHECK(hal_rt_spindle_orient_state(c, 3, &os) == 0 && os == HAL_ORIENT_DONE);
+    CHECK(hal_rt_commit_cycle(c) == 0);
+    hal_context_destroy(c);
+}
+
+/* 速度单位：驱动器是 pulse/s 时，对外仍然全是 rpm。
+ *
+ * 蓝海华腾 VTS 的 C2-00 出厂默认就是 pulse/s：不换算的话，写"300 rpm"会变成
+ * 300 脉冲/秒（主轴几乎不转），而"停稳"判据（转速<5）永远不成立。 */
+static void speed_unit_pulses_per_second(void) {
+    HalCConfig cfg = config();
+    cfg.spindles[0].axis.speed_unit = HAL_SPEED_PULSES_PER_S;
+    cfg.spindles[0].axis.command_pulses_per_rev = 10000;   /* 每转 1 万脉冲 */
+    HalContext* c = create(&cfg);
+    CHECK(hal_context_start(c, NULL, 0) == 0); enable(c);
+
+    /* 读：50000 脉冲/秒 = 300 rpm */
+    servo[0][DEV_DICT_ROLE_ACTUAL_SPEED] = 50000;
+    begin(c);
+    double rpm = 0.0;
+    CHECK(hal_rt_spindle_read_speed(c, 3, &rpm) == 0 && rpm > 299.9 && rpm < 300.1);
+    HalCAxisStatus st;
+    CHECK(hal_rt_axis_read_status(c, 3, &st) == 0 && st.speed_valid);
+    CHECK(st.actual_speed == 50000);                                  /* 原始值保留 */
+    CHECK(st.actual_speed_rpm > 299.9 && st.actual_speed_rpm < 300.1);/* 换算后 */
+
+    /* 写：300 rpm = 300/60×10000 = 50000 脉冲/秒；对外读回来仍是 rpm */
+    CHECK(hal_rt_spindle_write_speed(c, 3, 300, 1) == 0);
+    HalCSpindleStatus ss;
+    CHECK(hal_rt_spindle_read_status(c, 3, &ss) == 0 && ss.command_speed == 300);
+    CHECK(hal_rt_commit_cycle(c) == 0);
+    CHECK(servo[0][DEV_DICT_ROLE_TARGET_SPEED] == 50000u);
+    hal_context_destroy(c);
+
+    /* 填 pulse/s 却不给每转脉冲数 → 配置直接拒，不按 1:1 静默走 */
+    cfg = config();
+    cfg.spindles[0].axis.speed_unit = HAL_SPEED_PULSES_PER_S;
+    cfg.spindles[0].axis.command_pulses_per_rev = 0;
+    {
+        HalContext* bad = NULL; char err[128];
+        CHECK(hal_context_create(&cfg, &bad, err, sizeof(err)) == HAL_ERROR_CONFIG && !bad);
+    }
+    /* 单位枚举非法也一样 */
+    cfg.spindles[0].axis.speed_unit = 7;
+    cfg.spindles[0].axis.command_pulses_per_rev = 10000;
+    {
+        HalContext* bad = NULL; char err[128];
+        CHECK(hal_context_create(&cfg, &bad, err, sizeof(err)) == HAL_ERROR_CONFIG && !bad);
+    }
+}
+
 /* 主轴定向：厂商控制字 + 状态字完成位。 */
 static void spindle_orient(void) {
     HalCConfig cfg = config(); HalContext* c = create(&cfg);
@@ -1278,6 +1360,7 @@ int main(void) {
     pdo_width_policy();
     fault_reset_and_bus_health(); io_image_size(); review_regressions();
     voltage_stop_priority(); standard_enabled_status(); coverage_gaps();
-    spindle_orient(); orient_release_keeps_enable_intent(); axis_readiness();
+    spindle_orient(); spindle_orient_delay(); speed_unit_pulses_per_second();
+    orient_release_keeps_enable_intent(); axis_readiness();
     printf("context_regression: %u checks passed\n", checks);
 }

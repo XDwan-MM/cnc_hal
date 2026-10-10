@@ -38,6 +38,7 @@ typedef struct {
     double angle_command; /* 上次受理的普通刻度原值（保留方向符号） */
 
     int orient_state;   /* HAL_ORIENT_*：主轴定向进展；非 NONE 时暂停普通 DS402 推进 */
+    uint32_t orient_delay_left; /* 发控制字后的等待期还剩几拍；此间不采完成位 */
 
     int pos_dirty;      /* 有未下发的目标位置，commit 时写 0x607A */
     int speed_dirty;    /* 有未下发的目标速度，commit 时写 0x60FF */
@@ -594,14 +595,22 @@ static int sample_axis(Axis* a) {
     a->speed.enabled = a->status.enabled;
     a->speed.raw_status = (uint16_t)sw;
     a->speed.position_deg = a->status.actual_pos;
-    /* 速度 PDO 的单位假定为 rpm，不做任何当量换算——直接就是转速*/
-    a->speed.actual_speed = a->has_speed ?
+    /* 速度对象的**原始**读数：单位是驱动器自己的（0x606C），HAL 不猜。 */
+    const double raw_speed = a->has_speed ?
         signed32(velocity) * (a->cfg.feedback_invert ? -1 : 1) : 0;
-    /* 轴状态里给**同一份**读数：进给轴拿不到 spindle 那个出参（它要求主轴），而实际
-     * 速度是进给率显示要用的。两者必须同源，别让它们各算一遍漂开。 */
-    a->status.actual_speed = a->speed.actual_speed;
+    /* 换算成 rpm：pulse/s 用每转指令脉冲数折算，rpm 原样。除数为 0 的组合在配置校验里
+     * 就被拒了，走不到这里。 */
+    const double speed_rpm = (a->cfg.speed_unit == HAL_SPEED_PULSES_PER_S)
+        ? raw_speed * 60.0 / (double)a->cfg.command_pulses_per_rev
+        : raw_speed;
+    /* 主轴那份出参给 rpm（"停稳"判据要用它）；轴状态给**原始值** + rpm 两个口径。
+     * 两条都出自同一份 raw_speed，不会各算一遍漂开。进给轴拿不到 spindle 那个出参
+     * （它要求主轴），所以轴状态里那份才是进给率显示用的。 */
+    a->speed.actual_speed = speed_rpm;
+    a->status.actual_speed = raw_speed;
+    a->status.actual_speed_rpm = speed_rpm;
     a->status.speed_valid = a->has_speed;
-    if (!isfinite(a->status.actual_pos) || !isfinite(a->speed.actual_speed)) return HAL_ERROR_BUS;
+    if (!isfinite(a->status.actual_pos) || !isfinite(speed_rpm)) return HAL_ERROR_BUS;
     return HAL_OK;
 }
 
@@ -639,9 +648,11 @@ int32_t hal_rt_begin_cycle(HalContext* c) {
          * 完成位在状态字上——定完置 DONE 但**继续发控制字**，保持对准直到 release。 */
         if (a->spindle && a->orient_state != HAL_ORIENT_NONE) {
             const uint16_t omask = a->cfg.vendor_orient_done_mask;
-            if (a->orient_state == HAL_ORIENT_RUNNING && omask &&
-                (a->status.raw_status & omask))
-                a->orient_state = HAL_ORIENT_DONE;
+            if (a->orient_state == HAL_ORIENT_RUNNING && omask) {
+                /* 等待期内不看完成位：那几拍它可能还是别的含义（见 vendor_orient_delay_ms）。 */
+                if (a->orient_delay_left) --a->orient_delay_left;
+                else if (a->status.raw_status & omask) a->orient_state = HAL_ORIENT_DONE;
+            }
         }
         if (reset_control[i]) {
             /* 低电平先发送，第一次高电平才开始计超时；终态也必须释放 bit7。
@@ -939,9 +950,13 @@ int32_t hal_rt_spindle_write_speed(HalContext* c, HalAxisId id, double rpm, int3
     if (c->phase != 2) return HAL_ERROR_NOT_RUNNING;
     if (!a->motion_ready || !a->status.enabled) return HAL_ERROR_NOT_ENABLED;
     if (a->desired_mode != DS402_MODE_CSV || a->mode != DS402_MODE_CSV) return HAL_ERROR_MODE_MISMATCH;
-    /* 与读侧同一约定：速度 PDO 就是 rpm，不做当量换算。
-     * to_counts 会四舍五入到整数——驱动器速度单位若比 1 rpm 更细，精度在这里丢失。 */
-    rc = to_counts(rpm * dir * (a->cfg.command_invert ? -1 : 1), &a->speed_command);
+    /* 读侧同一约定：**对外永远是 rpm**，写下去之前按该轴 speed_unit 折成驱动器单位
+     * （pulse/s = rpm / 60 × 每转指令脉冲数）。
+     * to_counts 会四舍五入到整数——驱动器速度单位若比 1 更细，精度在这里丢失。 */
+    const double drive_speed = (a->cfg.speed_unit == HAL_SPEED_PULSES_PER_S)
+        ? rpm * (double)a->cfg.command_pulses_per_rev / 60.0
+        : rpm;
+    rc = to_counts(drive_speed * dir * (a->cfg.command_invert ? -1 : 1), &a->speed_command);
     if (rc) return rc;
     a->speed_dirty = 1;
     a->speed.command_speed = rpm * dir;
@@ -990,6 +1005,15 @@ int32_t hal_rt_spindle_request_orient(HalContext* c, HalAxisId id) {
     if (c->phase != 2) return HAL_ERROR_NOT_RUNNING;
     if (!a->status.enabled) return HAL_ERROR_NOT_ENABLED;
     a->orient_state = HAL_ORIENT_RUNNING;
+    /* 发控制字后的等待期（拍）。手册给的时序：先等够，完成位才是本模式下的含义。
+     * 按时长算成拍数、向上取整（宁可多等一拍）。cycle_us 为 0 时按 0 处理，不除零。 */
+    {
+        const int32_t ms = a->cfg.vendor_orient_delay_ms > 0 ? a->cfg.vendor_orient_delay_ms : 0;
+        const uint32_t us = (uint32_t)ms * 1000u;
+        a->orient_delay_left = (us && c->config.cycle_us)
+                                   ? (us + c->config.cycle_us - 1u) / c->config.cycle_us
+                                   : 0u;
+    }
     return HAL_OK;
 }
 
