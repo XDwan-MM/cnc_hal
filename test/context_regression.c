@@ -1168,6 +1168,52 @@ static void speed_unit_pulses_per_second(void) {
     }
 }
 
+/* 定向中途故障复位：复位序列不能被定向控制字盖掉；复位之后定向不再成立。 */
+static void orient_then_fault_reset(void) {
+    HalCConfig cfg = config();
+    cfg.fault_reset_timeout_ms = 50;
+    HalContext* c = create(&cfg);
+    CHECK(hal_context_start(c, NULL, 0) == 0);
+    enable(c);
+
+    /* 先进定向：主轴槽 3 在伺服索引 0 */
+    servo[0][DEV_DICT_ROLE_STATUS_WORD] = 0x0437u;
+    begin(c);
+    CHECK(hal_rt_spindle_request_orient(c, 3) == 0);
+    CHECK(hal_rt_commit_cycle(c) == 0);
+    CHECK(servo[0][DEV_DICT_ROLE_CONTROL_WORD] == 0x040Fu);
+
+    /* 驱动器报故障，请求复位 */
+    servo[0][DEV_DICT_ROLE_STATUS_WORD] = 0x0048u;   /* bit3 = Fault */
+    int32_t st = -1;
+    begin(c);
+    CHECK(hal_rt_axis_fault_reset(c, 3) == 0);
+    CHECK(hal_rt_axis_fault_reset_state(c, 3, &st) == 0 && st == HAL_RESET_PENDING);
+    CHECK(hal_rt_commit_cycle(c) == 0);
+
+    /* 复位低电平是**下一拍 begin** 才写下去的：那一拍的 commit 不得再用定向控制字
+     * 盖掉它（没修之前就是这里把复位序列吃掉，一直等到超时）。 */
+    cycle(c);
+    CHECK(servo[0][DEV_DICT_ROLE_CONTROL_WORD] != 0x040Fu);
+    CHECK((servo[0][DEV_DICT_ROLE_CONTROL_WORD] & 128u) == 0u);
+    /* 定向状态被复位清掉（否则复位收口后会再把 0x040F 发下去，把轴重新使能） */
+    int32_t os = -1;
+    CHECK(hal_rt_spindle_orient_state(c, 3, &os) == 0 && os == HAL_ORIENT_NONE);
+
+    /* 第二拍给高电平（复位上升沿） */
+    begin(c); CHECK(hal_rt_commit_cycle(c) == 0);
+    CHECK((servo[0][DEV_DICT_ROLE_CONTROL_WORD] & 128u) != 0u);
+    CHECK(servo[0][DEV_DICT_ROLE_CONTROL_WORD] != 0x040Fu);
+
+    /* 故障清掉 → 复位收口，且**保持未使能** */
+    servo[0][DEV_DICT_ROLE_STATUS_WORD] = 0x0040u;
+    for (int i = 0; i < 4; ++i) cycle(c);
+    CHECK(hal_rt_axis_fault_reset_state(c, 3, &st) == 0 && st == HAL_RESET_DONE);
+    HalCAxisStatus stt;
+    CHECK(hal_rt_axis_read_status(c, 3, &stt) == 0 && stt.enabled == 0);
+    hal_context_destroy(c);
+}
+
 /* 主轴定向：厂商控制字 + 状态字完成位。 */
 static void spindle_orient(void) {
     HalCConfig cfg = config(); HalContext* c = create(&cfg);
@@ -1360,7 +1406,8 @@ int main(void) {
     pdo_width_policy();
     fault_reset_and_bus_health(); io_image_size(); review_regressions();
     voltage_stop_priority(); standard_enabled_status(); coverage_gaps();
-    spindle_orient(); spindle_orient_delay(); speed_unit_pulses_per_second();
+    spindle_orient(); spindle_orient_delay(); orient_then_fault_reset();
+    speed_unit_pulses_per_second();
     orient_release_keeps_enable_intent(); axis_readiness();
     printf("context_regression: %u checks passed\n", checks);
 }

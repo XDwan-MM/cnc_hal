@@ -30,24 +30,36 @@ MASTER_API int Master_ServoStep(int slot, Ds402Request req,
         return -1;
 
     const slave_addr* axis = &g_device_data[slot].slave;
-    uint16_t sw = 0;
-    if (axis->statusWord.bit_length != 16 ||
-        GM_TxPdoEntry_Read(axis->statusWord, &sw, sizeof(sw)) != 0) return -1;
+    /* 位长不要求"恰好 16/8"：绑定层已经把可接受范围定死（状态字/控制字 16–32、
+     * 模式字 8–32，见 hal_context.c 的位长判据）。驱动层按**实际字节数**读、右对齐
+     * 取低 16/8 位；写方向 SDK 收 uint32（零扩展），宽条目也能写。
+     * 两边判据不一致会出现"启动成功、第一个周期闭锁成 BUS"——最难查的那种。 */
+    uint32_t raw_sw = 0;
+    if (axis->statusWord.bit_length < 16 || axis->statusWord.bit_length > 32 ||
+        GM_TxPdoEntry_Read(axis->statusWord, &raw_sw,
+                           (size_t)((axis->statusWord.bit_length + 7) / 8)) != 0) return -1;
+    const uint16_t sw = (uint16_t)raw_sw;
     if (sw_out) *sw_out = sw;
 
     uint8_t cur_mode = 0;
     /* 去使能、断电和清错不能依赖模式反馈可用。 */
-    if (req == DS402_REQ_ENABLE &&
-        (axis->act_mode.bit_length != 8 ||
-         GM_TxPdoEntry_Read(axis->act_mode, &cur_mode, sizeof(cur_mode)) != 0))
-        return -1;
+    if (req == DS402_REQ_ENABLE) {
+        uint32_t raw_mode = 0;
+        if (axis->act_mode.bit_length < 8 || axis->act_mode.bit_length > 32 ||
+            GM_TxPdoEntry_Read(axis->act_mode, &raw_mode,
+                               (size_t)((axis->act_mode.bit_length + 7) / 8)) != 0)
+            return -1;
+        cur_mode = (uint8_t)raw_mode;
+    }
 
     const Ds402Step step = Ds402_NextStepReq(sw, cur_mode, req, desired_op_mode, g_msw[slot]);
     const int write_control = step.kind != DS402_STEP_NONE &&
                               step.kind != DS402_STEP_DONE &&
                               step.kind != DS402_STEP_SWITCH_MODE;
-    if ((write_control && axis->Control_word.bit_length != 16) ||
-        (step.op_mode != 0xFFFFu && axis->Modes_of_operation.bit_length != 8) ||
+    if ((write_control && (axis->Control_word.bit_length < 16 ||
+                           axis->Control_word.bit_length > 32)) ||
+        (step.op_mode != 0xFFFFu && (axis->Modes_of_operation.bit_length < 8 ||
+                                     axis->Modes_of_operation.bit_length > 32)) ||
         (step.preset_target &&
          (axis->act_pos.bit_length != 32 || axis->target_pos.bit_length != 32)))
         return -1;

@@ -741,7 +741,13 @@ int32_t hal_rt_commit_cycle(HalContext* c) {
             if (Master_ServoWrite(a->slot, DEV_DICT_ROLE_TARGET_SPEED, 0)) return bus_error(c);
             a->zero_speed = 0;
         }
-        if (a->orient_state != HAL_ORIENT_NONE && !a->stop_override) {
+        /* 复位在飞时不写厂商定向控制字：两者写的是同一个 PDO，commit 在 begin 之后，
+         * 会把 begin 里排好的复位低/高电平盖掉 → 复位永远发不出去、一直等到超时。
+         * （复位请求本身已经把 orient_state 清成 NONE；这里再兜一道，免得以后有别的
+         * 路径在定向还活着时置 PENDING。判据只能是"**在飞**"——复位收口后是 DONE，
+         * 拿 NONE 当判据会把之后的定向永久挡掉。）*/
+        if (a->orient_state != HAL_ORIENT_NONE && !a->stop_override &&
+            a->reset_state != HAL_RESET_PENDING) {
             /* 定向控制字整字覆盖普通控制字。急停仍然优先，所以只在不急停时发。
              * 定完也继续发——保持驱动器对准，直到 release。 */
             if (Master_ServoWrite(a->slot, DEV_DICT_ROLE_CONTROL_WORD,
@@ -830,6 +836,10 @@ int32_t hal_rt_axis_fault_reset(HalContext* c, HalAxisId id) {
     cancel_motion(a);
     a->request = DS402_REQ_FAULT_RESET;
     a->reset_state = HAL_RESET_PENDING;
+    /* 复位把驱动器拉回未使能，之前的定向不再成立：清掉定向状态。
+     * 不清的话，复位收口后那一拍会恢复写厂商控制字 0x040F——而它**含使能位**，
+     * 等于复位之后又把驱动器重新使能，违反"复位终态一律未使能"。 */
+    a->orient_state = HAL_ORIENT_NONE;
     a->stop_override = 0; /* 后续显式清错允许覆盖历史停止，但不会使能。 */
     a->reset_high_next = 0;
     a->reset_deadline = 0; /* 从第一个实际准备发送的高电平开始计时。 */
