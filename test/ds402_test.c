@@ -212,6 +212,23 @@ int main(void) {
         chk(ok, "使能 → 去使能 → 断电，每步都对");
     }
 
+    {
+        const uint16_t sw[] = {0x40, 0x21, 0x23, 0x1737, 0x08, 0x07};
+        const uint16_t cw[] = {0, 6, 7, 15, 0, 0};
+        for (int i = 0; i < 6; ++i) {
+            const Ds402Step hold = Ds402_NextStepReq(sw[i], DS402_MODE_CSV,
+                DS402_REQ_NONE, DS402_MODE_CSV, DS402_MODESW_DISABLE_FIRST);
+            chk(!Ds402_StepWritesControl(hold), "NONE 不推进控制字");
+            chk(Ds402_ReleaseControlWord(hold, sw[i]) == cw[i], "释放厂商字时显式保持标准状态");
+        }
+        const Ds402Step mode = Ds402_NextStepReq(0x23, DS402_MODE_CSV,
+            DS402_REQ_ENABLE, DS402_MODE_CSP, DS402_MODESW_DISABLE_FIRST);
+        chk(!Ds402_StepWritesControl(mode), "切模式本身不写控制字");
+        chk(Ds402_ReleaseControlWord(mode, 0x23) == 7, "释放时切模式保持 SwitchedOn");
+        const Ds402Step disabled = Ds402_NextStepReq(0x23, DS402_MODE_CSV,
+            DS402_REQ_DISABLE, DS402_MODE_CSV, DS402_MODESW_DISABLE_FIRST);
+        chk(Ds402_ReleaseControlWord(disabled, 0x23) == 7, "NONE 去使能保持接通而不撤电压");
+    }
     printf("\n%s（%d 处失败）\n", fails ? "有问题" : "全部通过", fails);
     return fails ? 1 : 0;
 }

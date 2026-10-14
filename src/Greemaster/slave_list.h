@@ -21,11 +21,12 @@ void free_slave_chain(Slave_info* slave);
 
 Slave_info* create_empty_slave(uint32_t pos);
 /* 参数为空要写 (void)：写成 () 在 C 里表示「参数未指定」，传错参数也编得过。 */
+
 sm_info* create_empty_sm(void);
 pdo_info* create_empty_pdo(void);
 pdo_entry_info* create_empty_pdo_entry(void);
 
-// 专用追加函数
+// 链表追加（只追加，不排序）
 void add_slave_to_global_list(Slave_info* new_slave);
 void add_sm_to_slave(Slave_info* slave, sm_info* new_sm);
 void add_pdo_to_sm(sm_info* sm, pdo_info* new_pdo);

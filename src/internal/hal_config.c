@@ -2,9 +2,7 @@
 #include <math.h>
 #include <stdio.h>
 
-/* X/Y 是 PLC 的**字节**地址域。给个上界：手滑填一个很大的数会让映像长度涨到
- * GB 级，调用方按 hal_io_image_size() 的返回值分配时就是一次巨型分配。
- * 64 KiB 远超实际需要（示例用 0/256，实时端用 0..511）。 */
+/* X/Y 是 PLC 的字节地址域，上界 65535（64 KiB）；调用方按 hal_io_image_size() 的返回值分配。 */
 #define HAL_MAX_IO_BYTE_ADDR 65535
 
 static int32_t fail(char* err, uint32_t len, int32_t code, const char* text) {
@@ -17,44 +15,34 @@ static const HalCAxisCfg* axis_at(const HalCConfig* c, int i) {
 }
 
 int32_t hal_config_validate(const HalCConfig* c, char* err, uint32_t len) {
-    if (err && len) err[0] = '\0';   /* 先清空：不管成不成，err 里都不留上一次的旧文本 */
+    if (err && len) err[0] = '\0';   /* 先清空：不论成败，err 都不留上一次的旧文本 */
     if (!c) return fail(err, len, HAL_ERROR_ARGUMENT, "配置为空");
-    /* 版本闸门。三个字段**都要对**，而且 struct_size 是精确相等——它是唯一能挡住
-     * "字段插在中间"的检查。reserved 必须为 0：既给将来留位，又能立刻发现没清零的配置。 */
+    /* 版本闸门：abi_major/abi_minor/struct_size 都要对，struct_size 精确相等；reserved 必须为 0。 */
     if (c->abi_major != HAL_C_ABI_MAJOR || c->abi_minor != HAL_C_ABI_MINOR ||
         c->struct_size != sizeof(*c) || c->reserved)
         return fail(err, len, HAL_ERROR_ABI, "ABI 版本、结构大小或保留字段不匹配");
-    /* 指纹算法还没定（TODO）。这里**不静默忽略非零值**——否则调用方会以为指纹生效了。 */
+    /* 当前必须为 0（指纹算法未定） */
     if (c->topology_fingerprint)
-        return fail(err, len, HAL_ERROR_CONFIG, "拓扑指纹算法尚未启用，请使用 0"); // TODO 指纹算法未定暂时都填0
-    /* 主站周期与三个超时。cycle_us 下限 250：再快主站撑不住。
-     * 上限卡 UINT32_MAX/1000 是因为驱动层要把周期换算成纳秒——device.c 里
-     * sync0_cycle = cycle_us * 1000u，超过这个值那个 uint32 乘法就溢出了。
-     * 三个超时都不能为 0；dc_enable 只收 0/1，运行期不可变。 */
+        return fail(err, len, HAL_ERROR_CONFIG, "拓扑指纹算法尚未启用，请使用 0");
+    /* 主站周期与三个超时。cycle_us 下限 250、上限 UINT32_MAX/1000（驱动层按周期算纳秒 uint32，
+     * 不能溢出）；三个超时都不能为 0；dc_enable 只收 0/1，运行期不可变。 */
     if (c->cycle_us < 250 || c->cycle_us > UINT32_MAX / 1000u ||
         !c->start_timeout_ms || !c->cycle_timeout_ms ||
         !c->fault_reset_timeout_ms ||
         (c->dc_enable != 0 && c->dc_enable != 1))
         return fail(err, len, HAL_ERROR_CONFIG, "主站周期、超时或 DC 配置无效");
-    /* 各数组容量。最后一条是**总量**限制：四类设备的数量之和也受槽位预算约束，
-     * 不是每个数组各自不超就行。 */
+    /* 各数组容量。最后一条是总量限制：四类设备数量之和也受槽位预算约束。 */
     if (c->axis_count < 0 || c->axis_count > (int)HAL_C_MAX_DEV ||
         c->spindle_count < 0 || c->spindle_count > (int)HAL_C_MAX_SPINDLE ||
         c->io_count < 0 || c->io_count > (int)HAL_C_MAX_DEV ||
         c->panel_count < 0 || c->panel_count > (int)HAL_C_MAX_DEV ||
         c->axis_count + c->spindle_count + c->io_count + c->panel_count > (int)HAL_C_MAX_DEV)
         return fail(err, len, HAL_ERROR_CONFIG, "设备数量超出槽位容量");
-    /* 进给轴与主轴合成一张循环查——主轴在数组里紧接在进给轴之后，除 work_mode
-     * 之外两者的约束完全一样。 */
+    /* 进给轴与主轴合成一张循环查（主轴紧接在进给轴之后，除 work_mode 外约束相同）。 */
     const int count = c->axis_count + c->spindle_count;
     for (int i = 0; i < count; ++i) {
         const HalCAxisCfg* a = axis_at(c, i);
-        /* 一条 if 串起四类检查，任何一条不过都报同一句话（错误码相同，细节靠调用方对照配置）：
-         *   1. 从站号、轴序号、逻辑轴号的范围；
-         *   2. 主轴必须占一个逻辑轴号（-1 只允许进给轴）；
-         *   3. 急停动作、工作模式、编码器类型、模循环必须是合法枚举；
-         *   4. 两个当量与坐标偏置必须是正的有限值；
-         *   5. 速度单位得是合法枚举，填 pulse/s 时必须给每转指令脉冲数。 */
+        /* 下面一条 if 串起四类检查，任何一条不过都报同一句话（错误码相同，细节对照配置）。 */
         if (a->slave_pos < 0 || a->slave_pos >= (int)HAL_C_MAX_DEV || a->axis_index < 0 ||
             a->logical_axis < -1 || a->logical_axis >= 32 ||
             (i >= c->axis_count && a->logical_axis < 0) ||
@@ -70,7 +58,7 @@ int32_t hal_config_validate(const HalCConfig* c, char* err, uint32_t len) {
             !isfinite(a->feedback_units_per_count) || a->feedback_units_per_count <= 0 ||
             !isfinite(a->enc_off))
             return fail(err, len, HAL_ERROR_CONFIG, "轴绑定、急停动作、速度单位或换算参数无效");
-        /* 物理绑定与逻辑轴号都不能和前面任一轴重复。逻辑轴号 -1 表示不占轴槽，不参与去重。 */
+        /* 物理绑定与逻辑轴号都不能与前面任一轴重复；逻辑轴号 -1 不占轴槽，不参与去重。 */
         for (int j = 0; j < i; ++j) {
             const HalCAxisCfg* b = axis_at(c, j);
             if ((a->slave_pos == b->slave_pos && a->axis_index == b->axis_index) ||
@@ -78,14 +66,13 @@ int32_t hal_config_validate(const HalCConfig* c, char* err, uint32_t len) {
                 return fail(err, len, HAL_ERROR_CONFIG, "轴或主轴的物理绑定、逻辑轴号重复");
         }
     }
-    /* 主轴只校验转速上限——加减速曲线和"到速"判定都不归 HAL，没有对应字段。 */
+    /* 主轴只校验转速上限；加减速曲线与「到速」判定不归 HAL，没有对应字段。 */
     for (int i = 0; i < c->spindle_count; ++i) {
         const HalCSpindleCfg* s = &c->spindles[i];
         if (!isfinite(s->max_speed) || s->max_speed <= 0)
             return fail(err, len, HAL_ERROR_CONFIG, "主轴转速参数无效");
     }
-    /* IO 与面板共用 PLC 的字节地址域，所以放在一张循环里查，而且两件事必须一起查：
-     * 地址范围，以及"同一个从站不能既当伺服又当 IO"。 */
+    /* IO 与面板共用 PLC 字节地址域，一起查地址范围与从站占用冲突。 */
     for (int i = 0; i < c->io_count + c->panel_count; ++i) {
         const int panel = i >= c->io_count;
         const int index = panel ? i - c->io_count : i;
@@ -95,7 +82,7 @@ int32_t hal_config_validate(const HalCConfig* c, char* err, uint32_t len) {
         if (slave < 0 || slave >= (int)HAL_C_MAX_DEV ||
             x < 0 || x > HAL_MAX_IO_BYTE_ADDR || y < 0 || y > HAL_MAX_IO_BYTE_ADDR)
             return fail(err, len, HAL_ERROR_CONFIG, "IO 或面板地址无效");
-        /* 伺服和 IO 的 PDO 结构完全不同，同一从站不能两用。 */
+        /* 伺服与 IO 的 PDO 结构完全不同，同一从站不能两用。 */
         for (int j = 0; j < count; ++j)
             if (axis_at(c, j)->slave_pos == slave)
                 return fail(err, len, HAL_ERROR_CONFIG, "同一从站不能同时绑定伺服和 IO");
@@ -105,7 +92,7 @@ int32_t hal_config_validate(const HalCConfig* c, char* err, uint32_t len) {
             if (prev == slave) return fail(err, len, HAL_ERROR_CONFIG, "IO 或面板从站重复");
         }
     }
-    /* 静态检查到此为止。真实轴数、PDO 位长、X/Y 段是否重叠，都要等 start 认领设备才知道。 */
+    /* 静态检查到此为止；真实轴数、PDO 位长、X/Y 段重叠都要等 start 认领设备才知道。 */
     return HAL_OK;
 }
 

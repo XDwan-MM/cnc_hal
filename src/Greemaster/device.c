@@ -3,15 +3,13 @@
 #include "slave_list.h"
 #include "common/devdict.h"
 
-static int position = 0;   /* 装配期的槽推进游标，仅本文件用 */
+static int position = 0;   /* 装配期槽推进游标，仅本文件用 */
 static char g_bind_error[192];
 
 const char* device_bind_error(void) { return g_bind_error; }
 
-/* 一台从站在 g_device_data 里占几个槽。
- * 多轴驱动器一台占多个槽（axis6 → 6，axis4 → 4），所以"槽号"与"从站号"
- * 是两个不同的量，不能互相替代。COERequestResult()、device_match() 与
- * DeviceTable_Build() 三处推进必须走同一个规则，否则会整体错位且不报错。 */
+/* 一台从站占几个槽（axis6 → 6，axis4 → 4），故"槽号"与"从站号"是两个量，不可互替。
+ * COERequestResult()、device_match()、DeviceTable_Build() 三处推进必须走同一规则。 */
 int device_slot_count(DEVICE_TYPE type) {
     switch (type) {
     case SERVO_TYPE:         return 1;
@@ -34,8 +32,7 @@ static DEVICE_TYPE device_type_from_string(const char* s) {
     return UNKNOWN_TYPE;
 }
 
-/* 按 (厂商, 产品, 版本) 查设备字典定类型。字典未命中的设备也会被上报，
- * 类型为 UNKNOWN_TYPE（由调用方决定是否装配）。 */
+/* 按 (厂商, 产品, 版本) 查字典定类型；未命中返回 UNKNOWN_TYPE。 */
 DEVICE_TYPE get_device_types_from_info(const DEVICE_BASIC_INFO* device_info) {
     DevDictEntry e;
     if (!DevDict_Lookup((uint32_t)device_info->ID,
@@ -72,7 +69,7 @@ static int ParsePdosInBlock(const unsigned char* data, size_t bytes,
     return 0;
 }
 
-/* 结束标记只需一个 Word；块长度不含分类头，单位为 Word。 */
+/* 结束标记占一个 Word；块长度单位为 Word，不含分类头。 */
 static int parse_eeprom_pdos(const unsigned char* data, size_t bytes,
                              PDO_RESULT* tx, PDO_RESULT* rx,
                              ECAT_SYNC_M_INFO* sync, int* have_tx, int* have_rx) {
@@ -162,7 +159,6 @@ int build_chain_from_raw_data(Slave_info** slave_ptr,
     Slave_info* current_slave = *slave_ptr;
 
     if (rx_data->count != 0) {
-        // 创建 SM2 (Rx)
         sm_info* sm2_rx = create_empty_sm();
         if (!sm2_rx) return -1;
         sm2_rx->sync_index = 0x1c12;
@@ -174,11 +170,7 @@ int build_chain_from_raw_data(Slave_info** slave_ptr,
         sm2_rx->sm_size_btye = (rx_bit + 7) / 8;
         sm2_rx->pdo_num = rx_data->count;
 
-        // 将 SM_RX 加入 Slave
         add_sm_to_slave(current_slave, sm2_rx);
-        // ==========================================
-        // 【关键】维护 SM 级别的位偏移量 (Rx 从 0 开始)
-
         for (int i = 0; i < rx_data->count; i++) {
             VALID_PDO_INFO* pdo_data = &rx_data->validPdos[i];
 
@@ -187,7 +179,6 @@ int build_chain_from_raw_data(Slave_info** slave_ptr,
                 current_pdo_len_bits += pdo_data->entries[k].bitLen;
             }
 
-            // 创建 PDO 节点
             pdo_info* new_pdo = create_empty_pdo();
             if (!new_pdo) return -1;
             new_pdo->pdo_index = pdo_data->headerInfo.pdoEntry;
@@ -195,7 +186,6 @@ int build_chain_from_raw_data(Slave_info** slave_ptr,
             new_pdo->pdo_pos = i;
             new_pdo->pdo_entry_num = pdo_data->entryCount;
 
-            // 将 PDO 添加到 SM_RX
             add_pdo_to_sm(sm2_rx, new_pdo);
 
             uint32_t current_pdo_bit_offset = 0;
@@ -216,10 +206,6 @@ int build_chain_from_raw_data(Slave_info** slave_ptr,
             }
         }
     }
-    // ==========================================
-    // 1. 处理 TX PDOs -> 挂载到 sm3 (Sync Index 1, 0x1C13)
-    // ==========================================
-    // 创建 SM3
     if (tx_data->count != 0) {
         sm_info* sm3_tx = create_empty_sm();
         if (!sm3_tx) return -1;
@@ -233,20 +219,16 @@ int build_chain_from_raw_data(Slave_info** slave_ptr,
         sm3_tx->pdo_num = tx_data->count;
         add_sm_to_slave(current_slave, sm3_tx);
 
-        // 【关键】维护 SM 级别的位偏移量
         current_sm_bit_offset = 0;
 
         for (int i = 0; i < tx_data->count; i++) {
             VALID_PDO_INFO* pdo_data = &tx_data->validPdos[i];
 
-            // 创建 PDO 节点
-            // 估算 PDO 长度：sum(entry.bitLen)
             uint32_t current_pdo_len_bits = 0;
             for (int k = 0; k < pdo_data->entryCount; k++) {
                 current_pdo_len_bits += pdo_data->entries[k].bitLen;
             }
 
-            // 创建 PDO 节点
             pdo_info* new_pdo = create_empty_pdo();
             if (!new_pdo) return -1;
             new_pdo->pdo_index = pdo_data->headerInfo.pdoEntry;
@@ -254,17 +236,13 @@ int build_chain_from_raw_data(Slave_info** slave_ptr,
             new_pdo->pdo_pos = i;
             new_pdo->pdo_entry_num = pdo_data->entryCount;
 
-            // 将 PDO 添加到 SM_TX
             add_pdo_to_sm(sm3_tx, new_pdo);
 
-            // 【关键】维护 PDO 级别的位偏移量
             uint32_t current_pdo_bit_offset = 0;
 
-            // 填充该 PDO 下的 Entries
             for (int j = 0; j < pdo_data->entryCount; j++) {
                 PDO_ENTRY_ITEM* entry = &pdo_data->entries[j];
 
-                // 直接调用带返回值的 add 函数，传入计算好的偏移量
                 if (!add_pdo_entry_to_pdo(new_pdo,
                     entry->index,
                     entry->subIndex,
@@ -273,7 +251,6 @@ int build_chain_from_raw_data(Slave_info** slave_ptr,
                     current_sm_bit_offset         // bit_offset_sm: 相对于 SM 开头
                 )) return -1;
 
-                // 更新计数器
                 current_pdo_bit_offset += entry->bitLen;
                 current_sm_bit_offset += entry->bitLen;
             }
@@ -309,18 +286,14 @@ static int COERequestResult(const DEVICE_BASIC_INFO* info, const unsigned char* 
         const int freed = GM_Free_PDO_Map(fallback);
         if (rc != 0 || freed != 0) return -1;
     }
-    /* P1 只依据已有映射评估能力。未知设备限制时不能把可选对象试写到末尾 PDO；
-     * 有依据的映射生成留给 P3。 */
 
     const int tx_bits = calculate_tx_bit(&tx), rx_bits = calcute_rx_bit(&rx);
     Slave_info* slave = create_empty_slave(slave_pos);
     if (!slave) return -1;
     slave->Vendorid = info->ID;
     slave->ProductCode = info->CODE;
-    /* SDK 映射使用 ns；保持原有半周期相移策略，周期来自调用方配置。
-     * dc_enable 是整条总线的开关；逐设备 DC 支持能力仍须现场核对。
-     * 保留旧 activate=0x300；SYNC1 字段为 0 不等于关闭 SYNC1。
-     * 是否应只启用 SYNC0（0x100）须结合 SDK/设备手册及上机结果确认。 */
+    /* SDK 映射时间单位 ns：sync0 周期 = cycle_us*1000，相移 = 半周期。
+     * dc_enable 是整条总线的开关；activate=0x300（SYNC1 字段为 0 不等于关闭 SYNC1）。 */
     slave->sync_assign_activate = dc_enable ? 0x300u : 0u;
     slave->sync0_cycle = dc_enable ? cycle_us * 1000u : 0u;
     slave->sync0_shift = dc_enable ? cycle_us * 500u : 0u;
@@ -338,13 +311,9 @@ static int COERequestResult(const DEVICE_BASIC_INFO* info, const unsigned char* 
     return 0;
 }
 
-/* DS402 标准对象号 —— profile="ds402" 时用它；字典里不写 objects。
- * 这组值对应原硬编码的 6 个 Tx + 4 个 Rx 请求，行为等价。
- * 注意原实现没有绑 target_torque（0x6071），这里也不绑。
- *
- * 末列 bits 是**期望值，不是硬约束**：绑定以设备 ESI 实际声明的位长为准（见 find_object），
- * 这里只在绑不上时用于报错文案。原因：同一族 DS402 驱动器对 0x6060/0x6061 的声明可能是
- * 8 位也可能是 16 位（如蓝海华腾），一张全局表服务不了两种。够不够用由 HAL 判。 */
+/* DS402 标准对象号表 —— profile="ds402" 时用它；末列 bits 仅供绑不上时报错文案，
+ * 实际位长以设备 ESI 声明为准（同一族驱动器的 0x6060/0x6061 可能是 8 位或 16 位）。
+ * 不绑 target_torque（0x6071）。 */
 static const DevDictObject kDs402Std[] = {
     {DEV_DICT_ROLE_STATUS_WORD,   0x6041, 0x00, 16, 1},
     {DEV_DICT_ROLE_ACTUAL_POS,    0x6064, 0x00, 32, 1},
@@ -358,9 +327,7 @@ static const DevDictObject kDs402Std[] = {
     {DEV_DICT_ROLE_OP_MODE,       0x6060, 0x00,  8, 0},
 };
 
-/* 每台从站的 EEPROM 身份，按【从站号】索引。
- * get_device_info_from_eeprom 里那个 device_info 是局部变量、用完即丢，
- * 而 device_match 阶段查设备字典需要 (厂商, 产品, 版本)，所以在这里留一份。 */
+/* 每台从站的 EEPROM 身份，按【从站号】索引；device_match 查字典要用的 (厂商,产品,版本)。 */
 static DEVICE_BASIC_INFO g_slave_identity[MAX_DEVICE_NUM];
 
 const DEVICE_BASIC_INFO* device_identity_get(int slave_pos) {
@@ -392,9 +359,7 @@ static RxEntry_Unit* rx_role(slave_addr* axis, DevDictRole role) {
     }
 }
 
-/* 认领一个角色。**位长不跟声明的值比**——句柄带回来的就是 ESI 的实际位长，
- * 够不够用由 HAL 判（理由见 kDs402Std 上面那段）。这里只挡"物理读不进来"的宽度：
- * Master_ServoRead 最多按 4 字节读，所以 0 位或 >32 位的 Entry 直接拒。 */
+/* 认领角色并绑句柄：位长以 ESI 为准，只拒绝 0 位或 >32 位（Master_ServoRead 最多读 4 字节）。 */
 static int bind_servo_role(Slave_info* list, uint32_t slave_pos, uint32_t slot,
                            const DevDictObject* object, uint32_t pdo, uint32_t entry,
                            int by_index) {
@@ -440,8 +405,7 @@ static int find_object(const Slave_info* slave, const DevDictObject* object,
                  entry = entry->next, ++entry_index) {
                 if (entry->pdo_entry_index != object->index ||
                     entry->pdo_entry_subindex != object->sub) continue;
-                /* 只按对象号 + 子索引匹配，位长以 ESI 为准（理由见 kDs402Std 上面那段）。
-                 * 同一对象在 ESI 里出现两次仍然算错，照旧拒掉。 */
+                /* 只按对象号 + 子索引匹配，位长以 ESI 为准；同一对象出现两次算错，拒掉。 */
                 if (found) return -1;
                 *pdo_pos = pdo_index;
                 *entry_pos = entry_index;
@@ -486,9 +450,7 @@ int servo_addr_config(Slave_info* list, uint32_t slave_pos, uint32_t slot) {
         if (bind_servo_role(list, slave_pos, slot, &objects[i], pdo, entry, 0) != 0)
             return -1;
     }
-    /* 只查六个必需角色**在不在**（绑上了位长就非 0）。位长够不够不在这里判——
-     * 那是 HAL 的事：只有它知道自己的读写代码能吃多宽，而且它已经有一套分角色的判据
-     * （位置类必须 32 位，其余不窄于语义宽度）。这一层如实反映 ESI 说了什么。 */
+    /* 只查六个必需角色是否绑上（位长非 0）；位长够不够由 HAL 按角色判。 */
     const slave_addr* h = &g_device_data[slot].slave;
     if (!h->statusWord.bit_length || !h->act_pos.bit_length || !h->act_mode.bit_length ||
         !h->Control_word.bit_length || !h->target_pos.bit_length ||
@@ -587,8 +549,7 @@ int device_match(Slave_info* list, DEVICE_TYPE* types, int slave_num) {
         case GREE_AXIS4_TYPE: rc = servo_addr_axis4_config(list, slot, i); break;
         case CONTROL_PANEL_TYPE:
             rc = bind_io(list, i, slot, 1);
-            /* IO/面板装配失败原先只落到 main_demo 的通用文案，现场看不出是哪台、
-             * 哪个方向、第几个 Entry。这里补上从站与槽号。 */
+            /* IO/面板装配失败时补上从站与槽号，便于定位是哪台哪个方向的 Entry。 */
             if (rc != 0 && !g_bind_error[0])
                 snprintf(g_bind_error, sizeof(g_bind_error),
                          "从站 %d 槽 %d 的操作面板 PDO 装配失败（查 Entry 位宽与顺序）", i, slot);
@@ -631,7 +592,7 @@ int get_device_info_from_eeprom(int slave_num, DEVICE_TYPE* types,
     for (int i = 0; i < slave_num; ++i) {
         unsigned char* memory = calloc(buffer_size, 1);
         if (!memory) return -1;
-        /* 接真正的打断标志：否则从站不应答时要干等满 10 秒。 */
+        /* 接打断标志（从站不应答时提前退出等待）。 */
         int rc = GM_EEPROM_Get(i, memory, buffer_size, 10, Master_InterruptFlag());
         if (Master_Interrupted()) { free(memory); return -1; }
         if (rc > 0 && (size_t)rc <= buffer_size) {

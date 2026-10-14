@@ -5,7 +5,7 @@
 static DeviceSlot g_slots[MAX_DEVICE_NUM];
 static int        g_slot_count = 0;
 
-/* 名称来自设备字典；字典未命中的留空串（设备仍会出现在表里）。 */
+/* 设备字典未命中则留空串（设备仍会出现在表里）。 */
 static void fill_name(DeviceSlot* s) {
     DevDictEntry dict;
     s->name[0] = '\0';

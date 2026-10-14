@@ -32,6 +32,7 @@ static int fail_code = -7, fail_index, fail_nth = 1;
 static int sdk_calls, allocations, releases, closes, io_releases, handshakes;
 static int slaves = 1, bad_eeprom, missing_mode, missing_optional, wrong_width, use_fallback;
 static int wide_mode;   /* 非零 = 模式字按 16 位建 ESI（模拟蓝海华腾那类驱动） */
+static int wide_sw;     /* 非零 = 状态字/控制字按 32 位建 ESI（宽位 PDO）*/
 static int actual_eeprom_length, fallback_reads, fallback_frees;
 static int unknown_device;
 static uint16_t status_word = 0x23, read_fail_index, write_fail_index;
@@ -134,6 +135,8 @@ static size_t make_eeprom(unsigned char* data, int six_axis) {
                     PDO_ENTRY_ITEM entry = {0};
                     entry.index = obj->index + 2048 * axis;
                     entry.bitLen = wrong_width && obj->role == DEV_DICT_ROLE_ACTUAL_POS ? 16
+                                 : wide_sw && (obj->role == DEV_DICT_ROLE_STATUS_WORD ||
+                                               obj->role == DEV_DICT_ROLE_CONTROL_WORD) ? 32
                                  : wide_mode && (obj->role == DEV_DICT_ROLE_MODE_DISPLAY ||
                                                  obj->role == DEV_DICT_ROLE_OP_MODE) ? 16
                                  : obj->bits;
@@ -263,6 +266,18 @@ static void assert_closed(void) {
 static void lifecycle_tests(void) {
     actual_eeprom_length = -1;
     advance_start_ms = 2001;
+    /* 宽位 DS402 PDO（状态字/控制字 32 位）：**启动之后必须能真的走一步状态机**。
+     * 以前绑定层收 16–32 位、驱动层只认恰好 16 位，这类驱动器会启动成功、
+     * 第一个周期闭锁成 HAL_ERROR_BUS。 */
+    wide_sw = 1;
+    CHECK(ethercat_init(&config) == 0);
+    {
+        uint16_t sw16 = 0;
+        CHECK(Master_ServoStep(0, DS402_REQ_ENABLE, DS402_MODE_CSP, &sw16) >= 0);
+    }
+    CHECK(ethercat_close() == 0);
+    wide_sw = 0;
+
     CHECK(ethercat_init(&config) == 0);
     CHECK(start_seconds == 120 && active_seconds == 118 && op_seconds == 118);
     CHECK(Master_WaitCycle() == 0 && sync_seconds == 5);

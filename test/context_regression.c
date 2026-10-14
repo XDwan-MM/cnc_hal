@@ -156,7 +156,7 @@ int Master_ServoStep(int slot, Ds402Request req, uint16_t mode, uint16_t* out) {
     Ds402Step s = Ds402_NextStepReq(sw, servo[slot][DEV_DICT_ROLE_MODE_DISPLAY], req, mode, DS402_MODESW_DISABLE_FIRST);
     if (s.preset_target && Master_ServoWrite(slot, DEV_DICT_ROLE_TARGET_POS, servo[slot][DEV_DICT_ROLE_ACTUAL_POS])) return -1;
     if (s.op_mode != 0xFFFF && Master_ServoWrite(slot, DEV_DICT_ROLE_OP_MODE, s.op_mode)) return -1;
-    if (s.kind != DS402_STEP_NONE && s.kind != DS402_STEP_DONE && s.kind != DS402_STEP_SWITCH_MODE)
+    if (Ds402_StepWritesControl(s))
         return Master_ServoWrite(slot, DEV_DICT_ROLE_CONTROL_WORD, s.control_word);
     return 0;
 }
@@ -1092,6 +1092,55 @@ static void coverage_gaps(void) {
  * 6041h.bit10 在 CSV 模式下表示"速度达到设定转速"，发 0x40F 后延时 10ms 才表示
  * "定位完成"。不等的话主轴正常转到速时 bit10 本来就是 1 → 一请求就判 DONE，
  * M19 看起来"秒完成"，其实驱动器还没开始定位。 */
+static void spindle_orient_fresh_edge(void) {
+    for (int delay = 0; delay <= 5; delay += 5) {
+        HalCConfig cfg = config();
+        cfg.spindles[0].axis.vendor_orient_delay_ms = delay;
+        /* A different mask ensures the handshake is not hard-coded to bit10. */
+        cfg.spindles[0].axis.vendor_orient_done_mask = 0x0800u;
+        HalContext* c = create(&cfg);
+        CHECK(hal_context_start(c, NULL, 0) == 0);
+        enable(c);
+        int32_t os;
+        for (int round = 0; round < 3; ++round) {
+            servo[0][DEV_DICT_ROLE_STATUS_WORD] = 0x0037u;
+            begin(c); // A low before request/commit must not arm completion.
+            if (round == 1) CHECK(hal_rt_spindle_release_orient(c, 3) == 0);
+            CHECK(hal_rt_spindle_request_orient(c, 3) == 0);
+            CHECK(hal_rt_commit_cycle(c) == 0);
+            servo[0][DEV_DICT_ROLE_STATUS_WORD] = 0x0837u;
+            for (int i = 0; i < 12; ++i) cycle(c);
+            CHECK(hal_rt_spindle_orient_state(c, 3, &os) == 0 && os == HAL_ORIENT_RUNNING);
+            servo[0][DEV_DICT_ROLE_STATUS_WORD] = 0x0037u;
+            cycle(c);
+            servo[0][DEV_DICT_ROLE_STATUS_WORD] = 0x0837u;
+            cycle(c);
+            CHECK(hal_rt_spindle_orient_state(c, 3, &os) == 0 && os == HAL_ORIENT_DONE);
+        }
+        begin(c);
+        CHECK(hal_rt_spindle_release_orient(c, 3) == 0);
+        CHECK(hal_rt_spindle_request_orient(c, 3) == 0);
+        CHECK(hal_rt_commit_cycle(c) == 0);
+        servo[0][DEV_DICT_ROLE_STATUS_WORD] = 0x0037u;
+        cycle(c); // Low during the delay must be remembered.
+        servo[0][DEV_DICT_ROLE_STATUS_WORD] = 0x0837u;
+        cycle(c);
+        CHECK(hal_rt_spindle_orient_state(c, 3, &os) == 0 &&
+              os == (delay ? HAL_ORIENT_RUNNING : HAL_ORIENT_DONE));
+        for (int i = 0; i < 6; ++i) cycle(c);
+        CHECK(hal_rt_spindle_orient_state(c, 3, &os) == 0 && os == HAL_ORIENT_DONE);
+        begin(c);
+        CHECK(hal_rt_spindle_request_orient(c, 3) == 0);
+        CHECK(hal_rt_commit_cycle(c) == 0);
+        servo[0][DEV_DICT_ROLE_STATUS_WORD] = 0x0008u;
+        cycle(c); // A fault's low must not qualify as a handshake.
+        servo[0][DEV_DICT_ROLE_STATUS_WORD] = 0x0837u;
+        for (int i = 0; i < 12; ++i) cycle(c);
+        CHECK(hal_rt_spindle_orient_state(c, 3, &os) == 0 && os == HAL_ORIENT_RUNNING);
+        hal_context_destroy(c);
+    }
+}
+
 static void spindle_orient_delay(void) {
     HalCConfig cfg = config();
     cfg.spindles[0].axis.vendor_orient_delay_ms = 5;   /* 周期 1ms → 等 5 拍 */
@@ -1114,8 +1163,14 @@ static void spindle_orient_delay(void) {
     CHECK(hal_rt_spindle_orient_state(c, 3, &os) == 0 && os == HAL_ORIENT_RUNNING);
     CHECK(hal_rt_commit_cycle(c) == 0);
 
-    /* 等够之后才认 */
+    /* 等够也不能把旧高电平当完成。 */
     for (int i = 0; i < 6; ++i) cycle(c);
+    begin(c);
+    CHECK(hal_rt_spindle_orient_state(c, 3, &os) == 0 && os == HAL_ORIENT_RUNNING);
+    CHECK(hal_rt_commit_cycle(c) == 0);
+    servo[0][DEV_DICT_ROLE_STATUS_WORD] = 0x0037u;
+    cycle(c);
+    servo[0][DEV_DICT_ROLE_STATUS_WORD] = 0x0437u;
     begin(c);
     CHECK(hal_rt_spindle_orient_state(c, 3, &os) == 0 && os == HAL_ORIENT_DONE);
     CHECK(hal_rt_commit_cycle(c) == 0);
@@ -1168,6 +1223,52 @@ static void speed_unit_pulses_per_second(void) {
     }
 }
 
+/* 定向中途故障复位：复位序列不能被定向控制字盖掉；复位之后定向不再成立。 */
+static void orient_then_fault_reset(void) {
+    HalCConfig cfg = config();
+    cfg.fault_reset_timeout_ms = 50;
+    HalContext* c = create(&cfg);
+    CHECK(hal_context_start(c, NULL, 0) == 0);
+    enable(c);
+
+    /* 先进定向：主轴槽 3 在伺服索引 0 */
+    servo[0][DEV_DICT_ROLE_STATUS_WORD] = 0x0437u;
+    begin(c);
+    CHECK(hal_rt_spindle_request_orient(c, 3) == 0);
+    CHECK(hal_rt_commit_cycle(c) == 0);
+    CHECK(servo[0][DEV_DICT_ROLE_CONTROL_WORD] == 0x040Fu);
+
+    /* 驱动器报故障，请求复位 */
+    servo[0][DEV_DICT_ROLE_STATUS_WORD] = 0x0048u;   /* bit3 = Fault */
+    int32_t st = -1;
+    begin(c);
+    CHECK(hal_rt_axis_fault_reset(c, 3) == 0);
+    CHECK(hal_rt_axis_fault_reset_state(c, 3, &st) == 0 && st == HAL_RESET_PENDING);
+    CHECK(hal_rt_commit_cycle(c) == 0);
+
+    /* 复位低电平是**下一拍 begin** 才写下去的：那一拍的 commit 不得再用定向控制字
+     * 盖掉它（没修之前就是这里把复位序列吃掉，一直等到超时）。 */
+    cycle(c);
+    CHECK(servo[0][DEV_DICT_ROLE_CONTROL_WORD] != 0x040Fu);
+    CHECK((servo[0][DEV_DICT_ROLE_CONTROL_WORD] & 128u) == 0u);
+    /* 定向状态被复位清掉（否则复位收口后会再把 0x040F 发下去，把轴重新使能） */
+    int32_t os = -1;
+    CHECK(hal_rt_spindle_orient_state(c, 3, &os) == 0 && os == HAL_ORIENT_NONE);
+
+    /* 第二拍给高电平（复位上升沿） */
+    begin(c); CHECK(hal_rt_commit_cycle(c) == 0);
+    CHECK((servo[0][DEV_DICT_ROLE_CONTROL_WORD] & 128u) != 0u);
+    CHECK(servo[0][DEV_DICT_ROLE_CONTROL_WORD] != 0x040Fu);
+
+    /* 故障清掉 → 复位收口，且**保持未使能** */
+    servo[0][DEV_DICT_ROLE_STATUS_WORD] = 0x0040u;
+    for (int i = 0; i < 4; ++i) cycle(c);
+    CHECK(hal_rt_axis_fault_reset_state(c, 3, &st) == 0 && st == HAL_RESET_DONE);
+    HalCAxisStatus stt;
+    CHECK(hal_rt_axis_read_status(c, 3, &stt) == 0 && stt.enabled == 0);
+    hal_context_destroy(c);
+}
+
 /* 主轴定向：厂商控制字 + 状态字完成位。 */
 static void spindle_orient(void) {
     HalCConfig cfg = config(); HalContext* c = create(&cfg);
@@ -1186,7 +1287,9 @@ static void spindle_orient(void) {
     CHECK(servo[0][DEV_DICT_ROLE_CONTROL_WORD] == 0x040Fu);
     CHECK(servo[0][DEV_DICT_ROLE_TARGET_SPEED] == 0u);
 
-    /* 驱动器报完成位 → DONE，且**继续发控制字**保持对准。 */
+    /* 本轮提交后先见低，再报完成位；继续发控制字保持对准。 */
+    servo[0][DEV_DICT_ROLE_STATUS_WORD] = 0x0037u;
+    cycle(c);
     servo[0][DEV_DICT_ROLE_STATUS_WORD] = 0x0437u;
     begin(c);
     CHECK(hal_rt_spindle_orient_state(c, 3, &os) == 0 && os == HAL_ORIENT_DONE);
@@ -1327,6 +1430,8 @@ static void orient_release_keeps_enable_intent(void) {
     begin(c);
     CHECK(hal_rt_spindle_request_orient(c, 3) == 0);
     CHECK(hal_rt_commit_cycle(c) == 0);
+    servo[0][DEV_DICT_ROLE_STATUS_WORD] = 0x0037u;
+    cycle(c);
     servo[0][DEV_DICT_ROLE_STATUS_WORD] = 0x0437u;
     cycle(c);
 
@@ -1353,6 +1458,99 @@ static void orient_release_keeps_enable_intent(void) {
     hal_context_destroy(c);
 }
 
+static void orient_release_clears_vendor_control(void) {
+    for (int action = 0; action < 4; ++action) {
+        HalCConfig cfg = config();
+        HalContext* c = create(&cfg);
+        CHECK(hal_context_start(c, NULL, 0) == 0);
+        enable(c);
+        begin(c);
+        CHECK(hal_rt_spindle_request_orient(c, 3) == 0);
+        CHECK(hal_rt_commit_cycle(c) == 0);
+        servo[0][DEV_DICT_ROLE_STATUS_WORD] = 0x0037u;
+        cycle(c);
+        servo[0][DEV_DICT_ROLE_STATUS_WORD] = 0x1737u;
+        begin(c);
+        int32_t os;
+        CHECK(hal_rt_spindle_orient_state(c, 3, &os) == 0 && os == HAL_ORIENT_DONE);
+        CHECK(servo[0][DEV_DICT_ROLE_CONTROL_WORD] == 0x040Fu);
+        CHECK(hal_rt_spindle_release_orient(c, 3) == 0);
+        /* release 只暂存，不能在 commit 之前写 PDO。 */
+        CHECK(servo[0][DEV_DICT_ROLE_CONTROL_WORD] == 0x040Fu);
+        if (action == 1) CHECK(hal_rt_spindle_enable(c, 3, 0) == 0);
+        if (action == 2) CHECK(hal_rt_spindle_estop(c, 3) == 0);
+        if (action == 3) {
+            servo[0][DEV_DICT_ROLE_STATUS_WORD] = 8u;
+            CHECK(hal_rt_axis_fault_reset(c, 3) == 0);
+        }
+        CHECK(hal_rt_commit_cycle(c) == 0);
+        if (action == 0) {
+            CHECK(servo[0][DEV_DICT_ROLE_CONTROL_WORD] == DS402_CW_ENABLE_OP);
+            cycle(c);
+            begin(c);
+            CHECK(hal_rt_spindle_orient_state(c, 3, &os) == 0 && os == HAL_ORIENT_NONE);
+            CHECK(hal_rt_spindle_write_speed(c, 3, 100, 1) == 0);
+            CHECK(hal_rt_commit_cycle(c) == 0);
+            CHECK(servo[0][DEV_DICT_ROLE_CONTROL_WORD] == DS402_CW_ENABLE_OP);
+            CHECK(servo[0][DEV_DICT_ROLE_TARGET_SPEED] == 100u);
+        } else if (action == 3) {
+            cycle(c);
+            CHECK(servo[0][DEV_DICT_ROLE_CONTROL_WORD] == 0u);
+            cycle(c);
+            CHECK(servo[0][DEV_DICT_ROLE_CONTROL_WORD] == DS402_CW_FAULT_RESET);
+            cycle(c); cycle(c);
+            begin(c);
+            HalCAxisStatus st;
+            CHECK(hal_rt_axis_read_status(c, 3, &st) == 0 && !st.enabled);
+            CHECK(hal_rt_commit_cycle(c) == 0);
+            CHECK(servo[0][DEV_DICT_ROLE_CONTROL_WORD] == 0u);
+        } else {
+            CHECK(servo[0][DEV_DICT_ROLE_CONTROL_WORD] ==
+                (action == 1 ? DS402_CW_SWITCH_ON : DS402_CW_DISABLE_VOLTAGE));
+            CHECK(servo[0][DEV_DICT_ROLE_TARGET_SPEED] == 0u);
+        }
+        hal_context_destroy(c);
+    }
+}
+
+static void stopped_orientation_does_not_resume(void) {
+    for (int action = 0; action < 4; ++action) {
+        HalCConfig cfg = config();
+        if (action == 2) cfg.spindles[0].axis.estop_action = HAL_ESTOP_DISABLE_OPERATION;
+        HalContext* c = create(&cfg);
+        CHECK(hal_context_start(c, NULL, 0) == 0);
+        enable(c);
+        begin(c);
+        CHECK(hal_rt_spindle_request_orient(c, 3) == 0);
+        CHECK(hal_rt_commit_cycle(c) == 0);
+        servo[0][DEV_DICT_ROLE_STATUS_WORD] = 0x1737u;
+        begin(c);
+        if (action == 0) CHECK(hal_rt_spindle_enable(c, 3, 0) == 0);
+        else if (action < 3) CHECK(hal_rt_spindle_estop(c, 3) == 0);
+        else CHECK(hal_rt_spindle_request_mode(c, 3, HAL_SPINDLE_CSP) == 0);
+        int32_t os;
+        CHECK(hal_rt_spindle_orient_state(c, 3, &os) == 0 && os == HAL_ORIENT_NONE);
+        if (action < 3) CHECK(hal_rt_spindle_request_orient(c, 3) == HAL_ERROR_NOT_ENABLED);
+        CHECK(hal_rt_commit_cycle(c) == 0);
+        CHECK(servo[0][DEV_DICT_ROLE_CONTROL_WORD] != 0x040Fu);
+        if (action < 3) CHECK(hal_rt_spindle_enable(c, 3, 1) == 0);
+        for (int i = 0; i < 8; ++i) {
+            cycle(c);
+            CHECK(servo[0][DEV_DICT_ROLE_CONTROL_WORD] != 0x040Fu);
+        }
+        begin(c);
+        HalCSpindleStatus st;
+        CHECK(hal_rt_spindle_read_status(c, 3, &st) == 0 && st.enabled);
+        CHECK(st.mode == (action == 3 ? HAL_SPINDLE_CSP : HAL_SPINDLE_CSV));
+        CHECK(hal_rt_spindle_orient_state(c, 3, &os) == 0 && os == HAL_ORIENT_NONE);
+        /* 新的显式请求仍可启动定向。 */
+        CHECK(hal_rt_spindle_request_orient(c, 3) == 0);
+        CHECK(hal_rt_commit_cycle(c) == 0);
+        CHECK(servo[0][DEV_DICT_ROLE_CONTROL_WORD] == 0x040Fu);
+        hal_context_destroy(c);
+    }
+}
+
 int main(void) {
     lifecycle(); binding(); optional_capabilities(); motion_io(); wrap_and_faults();
     stop_overrides_staged_enable(); concurrent_stop();
@@ -1360,7 +1558,10 @@ int main(void) {
     pdo_width_policy();
     fault_reset_and_bus_health(); io_image_size(); review_regressions();
     voltage_stop_priority(); standard_enabled_status(); coverage_gaps();
-    spindle_orient(); spindle_orient_delay(); speed_unit_pulses_per_second();
-    orient_release_keeps_enable_intent(); axis_readiness();
+    spindle_orient(); spindle_orient_delay(); spindle_orient_fresh_edge(); orient_then_fault_reset();
+    speed_unit_pulses_per_second();
+    orient_release_keeps_enable_intent(); orient_release_clears_vendor_control();
+    stopped_orientation_does_not_resume(); axis_readiness();
     printf("context_regression: %u checks passed\n", checks);
+    return 0;
 }

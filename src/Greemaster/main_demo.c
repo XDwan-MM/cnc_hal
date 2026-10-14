@@ -13,7 +13,7 @@
 
 // ==============全局变量定义===============
 static atomic_int   InterruptFlag = 0;  // 打断标志（传给 GM 的阻塞调用）
-static atomic_int   exit_flag      = 1;  // 主站出错/已停机：错误回调或关闭时置 1
+static atomic_int   exit_flag      = 1;  // 主站出错/已停机，错误回调或关闭时置 1
 static atomic_int stop_requested = 0;
 static uint64_t start_deadline_ms;
 
@@ -45,33 +45,22 @@ int slave_num = 0;
 static char g_start_error[192];
 const char* Master_StartupError(void) { return g_start_error; }
 
-/* ethercat_init() 存下的配置。周期原语（Master_WaitCycle）要用 cycle_timeout_ms，
- * 而那些函数没有入参——配置在启动时定一次，之后不变。 */
+/* ethercat_init() 存下的配置：周期原语无入参，需要这里的 cycle_timeout_ms。 */
 static MasterConfig g_cfg;
 static int g_resources, g_master_initialized, g_io_resources, g_ready;
 int Master_SlaveCount(void) { return g_ready ? slave_num : 0; }
 
-/* 传给 GM 阻塞调用的打断标志地址。**SDK 只读它**；HAL 侧一律用 atomic 访问。
- * 单独给个取址函数，是为了让 device.c 那两处 EEPROM / PDO 映射读取也能被打断——
- * 否则某台从站不应答时要干等满 10 秒，30 台最坏 300 秒，谁也停不下来。
- * _Atomic int 与 int 布局一致，这里取地址做转换。 */
+/* 传给 GM 阻塞调用的打断标志地址。SDK 只读它，HAL 侧一律 atomic 访问；
+ * 单独给取址函数是为了 device.c 的 EEPROM / PDO 映射读取也能被停止。
+ * _Atomic int 与 int 布局一致，这里取地址转换。 */
 int* Master_InterruptFlag(void) { return (int*)&InterruptFlag; }
 /* 是否已被要求打断（错误回调或 Master_RequestStop 置位）。 */
 int Master_Interrupted(void) { return atomic_load(&InterruptFlag) != 0; }
-device_data_t g_device_data[MAX_DEVICE_NUM] = { 0 };  // 假设最多 30 个设备
-// ================打断函数=================
-// 原 sigint_handler() 已删除：库不该装 SIGINT 处理器，会覆盖宿主程序自己的。
-// Ctrl-C、退出流程归调用方。HAL 只保留 exit_flag / InterruptFlag 供其查询与打断。
+device_data_t g_device_data[MAX_DEVICE_NUM] = { 0 };  // 按【槽】索引
 
-/* 实际分配内存的全局错误上下文。
- * **当前只写不读**：错误回调往里填，但全仓库没有任何读取者（旧的报警查表随
- * master.c 一起退休）。保留的理由是 get_unique_error_id() 那张「厂商错误码 ->
- * ErrorID」的表是恢复更细报警的现成材料；真要用起来必须补上读取方。 */
+/* 全局错误上下文：**当前只写不读**（错误回调填，无读取者）。 */
 static ErrorContext g_current_error_ctx;
 
-// ==========================================
-// 3. 辅助函数
-// ==========================================
 static uint32_t get_unique_error_id(uint32_t model, uint32_t fms, uint32_t code, uint32_t Errslave) {
     if (model == 1) {
         return ECAT_INIT_ERROR;
@@ -111,16 +100,11 @@ static uint32_t get_unique_error_id(uint32_t model, uint32_t fms, uint32_t code,
     return UNKOWN_ERROR;
 }
 
-// ==========================================
-// 4. 公共接口实现
-// ==========================================
-
 void error_module_init(void) {
     memset(&g_current_error_ctx, 0, sizeof(g_current_error_ctx));
     //atomic_store(&g_has_new_error, false);
 }
 
-// ================错误处理函数=================
 void err_call_back() {
     Err_info errinfo;
     /* 先清零再取：失败时 SDK 不保证出参被填，读未初始化的栈会把
@@ -130,7 +114,6 @@ void err_call_back() {
         printf("错误回调：Err_Code_Get 失败，错误详情不可用\n");
     printf("错误模块：%d, 错误状态机：%d, 错误号：%d\n", errinfo.Model,
         errinfo.Fms, errinfo.Code);
-    // 1. 提取关键字段并查表
     g_current_error_ctx.Model = errinfo.Model;
     g_current_error_ctx.Fms = errinfo.Fms;
     g_current_error_ctx.Code = errinfo.Code;
@@ -139,7 +122,6 @@ void err_call_back() {
         errinfo.Model, errinfo.Fms, errinfo.Code, errinfo.Errslave
     );
 
-    // 2. 原子设置标志位：有新错误
     //atomic_store(&g_has_new_error, true);
     Err_Info_Get(errinfo, NULL);
     exit_flag = 1;
@@ -147,21 +129,15 @@ void err_call_back() {
 }
 
 // ================ 新增：初始化函数（供外部调用）=================
-/* 主站进 OP 之后、进周期收发模式之前的一次握手。
- *
- * 顺序照 cnc_rt/src/master/master.c 的 Master_Receive() 转写——那是跑过的实现：
+/* 主站进 OP 之后、进周期收发模式之前的一次握手，顺序（不可换）：
  *   握手前收一帧 → IO 端口资源分配 → 握手前发一帧 → GM_Master_OP_Valid()
- * 握手成功后主站才进周期性收发数据帧模式。
- *
  * @return 0 成功；非 0 为 GM 错误码。 */
 
-/* 最近一次收帧的警告。Master_BusHealth() 读它。 */
+/* 最近一次收帧的警告，Master_BusHealth() 读它。 */
 static PdoWarn g_last_warn;
 
-/* 收帧后统一记录。**只缓存，不做任何打印**：本函数在 Master_WaitCycle() 的
- * 实时路径上，而 PdoWar_Info_Get() 是 SDK 的打印型接口（OutFile=NULL 即打到
- * stdout）——持续告警会变成每拍 printf，把实时线程拖住。详情改在非 RT 的
- * Master_BusHealth() 里取。 */
+/* 只缓存不打印：本函数在 Master_WaitCycle() 的实时路径上，而 PdoWar_Info_Get()
+ * 是 SDK 的打印型接口（OutFile=NULL 打到 stdout）。详情改在 Master_BusHealth() 取。 */
 static void record_warn(const PdoWarn* w) {
     if (!w) return;
     g_last_warn = *w;
@@ -182,7 +158,7 @@ static int master_handshake(void) {
         printf("警告：握手前 CRC 错误 %u 次，帧超时 %u 次\n",
                (unsigned)warn.CRCErrCount, (unsigned)warn.FlameTimeOutCount);
 
-    /* IO 端口资源分配。GM 原语，归本层（原先在封装侧）。 */
+    /* IO 端口资源分配（GM 原语）。 */
     g_io_resources = 1;
     rc = IO_Resource_Allocation_Scanf();
     if (rc != 0) return -1;
@@ -206,12 +182,11 @@ MASTER_API int ethercat_init(const MasterConfig* cfg) {
     uint32_t CRCCount = 0;
     uint32_t TimeOutCount = 0;
     DEVICE_TYPE types[MAX_DEVICE_NUM] = {0};
-    /* 先清上一次的失败原因：下面有几条提前 return（已初始化、cfg 为空、参数非法），
-     * 不清的话 Master_StartupError() 会把上一次的原因当成这一次报出去。 */
+    /* 先清上次失败原因（下面有提前 return，避免 StartupError 报旧原因）。 */
     g_start_error[0] = '\0';
     if (g_resources || g_ready) return -1;
 
-    /* 配置非法就早失败——放在任何 GM 调用之前，不留下半开的主站。 */
+    /* 配置非法就早失败，放在任何 GM 调用之前，不留半开的主站。 */
     if (!cfg) {
         printf("错误：ethercat_init() 的 cfg 为空\n");
         return -1;
@@ -238,7 +213,7 @@ MASTER_API int ethercat_init(const MasterConfig* cfg) {
 
     error_module_init();
 
-    /* 在申请主站资源前确认字典可用，避免路径错误时仍将总线拉到 OP。 */
+    /* 在申请主站资源前确认字典可用，避免路径错误时仍把总线拉到 OP。 */
     const char* dict_path = getenv("CNC_HAL_DEVICES_JSON");
     if (!dict_path) dict_path = DEVICES_JSON_PATH;
     if (!dict_path || !*dict_path) {
@@ -303,7 +278,6 @@ MASTER_API int ethercat_init(const MasterConfig* cfg) {
     rc = get_device_info_from_eeprom(slave_num, types, cfg->cycle_us, cfg->dc_enable);
     CHECK_RC(rc, "读取或解析 EEPROM 失败", err_close);
 
-    // 计算PDO映射
     printf("=============== 计算PDO映射:GM_Calculate_Config_Info ==================\n");
     rc = GM_Calculate_Config_Info(&slave_list);
     CHECK_RC(rc, "计算PDO映射失败", err_close);
@@ -317,7 +291,7 @@ MASTER_API int ethercat_init(const MasterConfig* cfg) {
     }
     CHECK_RC(rc, "设备句柄装配失败", err_close);
 
-    /* 装配完成后建按槽设备表——这是本层对 HAL 的取数口。 */
+    /* 装配完成后建按槽设备表（本层对 HAL 的取数口）。 */
     rc = DeviceTable_Build(slave_num);
     if (rc < 0) goto err_close;
 
@@ -332,7 +306,7 @@ MASTER_API int ethercat_init(const MasterConfig* cfg) {
         CHECK_RC(rc, "使能DC信号失败", err_close);
     }
 
-    { /* 驱动内部的状态查询资源，不作为公共配置开关。 */
+    { /* 驱动内部的状态查询资源（reg_num=2，mem_size={6,6}），不是公共配置开关。 */
         printf("=============== 正在申请寄存器资源 ==================\n");
         int reg_num = 2;
         uint32_t mem_size[2] = { 6, 6 };
@@ -340,7 +314,7 @@ MASTER_API int ethercat_init(const MasterConfig* cfg) {
         CHECK_RC(rc, "申请寄存器资源失败", err_close);
     }
 
-    { /* 驱动内部的设备参数通道。 */
+    { /* 驱动内部的设备参数通道（SDO）。 */
         printf("=============== 正在申请SDO资源 ==================\n");
         rc = GM_Sdo_Datagram_Enable();
         CHECK_RC(rc, "SDO功能使能失败", err_close);
@@ -362,7 +336,7 @@ MASTER_API int ethercat_init(const MasterConfig* cfg) {
     rc = GM_Master_Wait_OP(seconds_left, Master_InterruptFlag());
     CHECK_RC(rc, "等待主站进入OP", err_close);
 
-    /* 主站到 OP 只是第一步——还要握手才进周期收发模式，从站才会走 OP。 */
+    /* 进 OP 只是第一步：还要握手才进周期收发模式。 */
     rc = master_handshake();
     CHECK_RC(rc, "与主站握手", err_close);
 
@@ -375,15 +349,12 @@ err_close:
     return rc < 0 ? rc : -1;
 }
 
-// ================ 新增：关闭函数 =================
 MASTER_API int ethercat_close(void) {
     int first_error = 0, rc;
     exit_flag = 1;
     atomic_store(&InterruptFlag, 1);
     g_ready = 0;
-    /* 调用方须先退出周期调用，再释放主站与句柄。 */
-    /* 顺序照厂商示例（/opt/GreeMaster/examples/main_demo.c）：先释放 PDO 映射链表，
-     * 再关主站。反过来的话等于假设 GM_Master_Close 不会先动这条链——未经验证。 */
+    /* 调用方须先退出周期调用。先释放 PDO 映射链表，再关主站。 */
     if (slave_list) {
         rc = GM_Free_PDO_Map(slave_list);
         if (rc != 0 && first_error == 0) first_error = rc < 0 ? rc : -1;
@@ -414,8 +385,6 @@ MASTER_API int ethercat_close(void) {
     return first_error;
 }
 
-/* ==================== 周期原语（只在实时线程调用） ==================== */
-
 MASTER_API int Master_WaitCycle(void) {
     if (!g_ready) return -1;
     if (stop_requested) return MASTER_STOP_REQUESTED;
@@ -430,15 +399,14 @@ MASTER_API int Master_WaitCycle(void) {
     if (stop_requested) return MASTER_STOP_REQUESTED;
     if (rc != 0) return rc < 0 ? rc : -1;
 
-    /* 警告不致命，也不在这里报警——报警策略归上层。记下来供 Master_BusHealth() 查。 */
+    /* 警告不致命，报警策略归上层；记下来供 Master_BusHealth() 查。 */
     record_warn(&warn);
     return 0;
 }
 
 MASTER_API int Master_BusHealth(MasterBusHealth* out) {
     if (!out) return -1;
-    /* 非 RT 查询路径：有警告标志时才向 SDK 取详情（该接口会打印）。
-     * 原先在 Master_WaitCycle 里取，持续告警会每拍刷屏并拖住实时线程。 */
+    /* 非 RT 查询路径：有警告标志时才向 SDK 取详情（该接口会打印）。 */
     if (g_last_warn.PDOWarnFlag || g_last_warn.DCWarnFlag)
         PdoWar_Info_Get(NULL, &g_last_warn);
     out->pdo_warn             = (int)g_last_warn.PDOWarnFlag;
@@ -462,34 +430,25 @@ MASTER_API int Master_CommitCycle(void) {
     return rc == 0 ? 0 : (rc < 0 ? rc : -1);
 }
 
-/* 主站是否出过错或已停机。错误回调（err_call_back）和 ethercat_close() 会置位。
- * 给 HAL 查询用——它只读，不通过这个去推状态。 */
+/* 主站是否出过错或已停机（err_call_back / ethercat_close() 置位）；给 HAL 只读查询。 */
 MASTER_API int Master_StopFlag(void) {
     return exit_flag || stop_requested;
 }
 
-/* 两个标志都用 atomic：它们会被别的线程（停止请求）或 SDK 的回调线程写，
- * 而 SDK 的阻塞调用在本线程里轮询。 */
+/* 两个标志都用 atomic：会被停止请求线程或 SDK 回调线程写，阻塞调用在本线程轮询。 */
 MASTER_API void Master_RequestStop(void) {
     stop_requested = 1;
     atomic_store(&InterruptFlag, 1);   /* 让启动期的阻塞调用也能被停掉 */
 }
 
-/* TODO(总线状态) 原 reg_thread_func 的职责：查从站的 AL 状态（寄存器 0x130），
- * 判断有没有掉出 OP。它走 mailbox，是慢通道，**不能放周期里**；将来由 HAL 提供
- * 非 RT 的查询接口，调用节奏由实时端定。原实现只是每秒 printf 一次。 */
-
-/* ↓ write_sdo_index / read_sdo_index **当前没有任何调用者**（启动时
- * GM_Sdo_Datagram_Enable 已经把 SDO 通道打开，却没人用）。
- * **先别删**：确认驱动器 0x606C/0x60FF 的速度单位很可能就要走这里读对象字典。
- * 真要启用时记得检查 GM_Sdo_Request_Send / GM_Sdo_Receive 的返回值，
- * 并去掉每次重试都 printf 的写法。 */
+/* write_sdo_index / read_sdo_index：**当前没有调用者**（SDO 通道在启动时已打开）。
+ * 保留原因：驱动器 0x606C/0x60FF 的速度单位很可能要在这里读对象字典。
+ * 真要启用须检查 GM_Sdo_Request_Send / GM_Sdo_Receive 的返回值。 */
 int write_sdo_index(int slave_pos, uint16_t index, uint8_t subindex, void* data, size_t data_size, int max_retry) {
     int cnt = 0;
     
-    // 严格按结构体定义初始化
     SdoRequests sdo_request = {
-        .WR = 1,                  // 0 = 写操作
+        .WR = 1,                  // 1 = 写操作
         .SlavePos = slave_pos,            // 从站位置（0表示当前从站）
         .Index = index,           // 索引号
         .SubIndex = subindex,     // 子索引号
@@ -501,9 +460,7 @@ int write_sdo_index(int slave_pos, uint16_t index, uint8_t subindex, void* data,
         .WarnPra2 = 0
     };
 
-    // 发送初始请求
     GM_Sdo_Request_Send(sdo_request);
-    //rc = GM_Sdo_Receive(&sdo_request, 5);
     while(sdo_request.status != P_SDO_SUCCESS){
         if(cnt > max_retry){
             return -1;
@@ -522,7 +479,6 @@ int write_sdo_index(int slave_pos, uint16_t index, uint8_t subindex, void* data,
 int read_sdo_index(int slave_pos, uint16_t index, uint8_t subindex, void* data, size_t data_size, int max_retry) {
     int cnt = 0;
     
-    // 严格按结构体定义初始化
     SdoRequests sdo_request = {
         .WR = 0,                  // 0 = 读操作
         .SlavePos = slave_pos,            // 从站位置（0表示当前从站）
@@ -536,10 +492,7 @@ int read_sdo_index(int slave_pos, uint16_t index, uint8_t subindex, void* data, 
         .WarnPra2 = 0
     };
 
-    // 发送初始请求
-    // 发送初始请求
     GM_Sdo_Request_Send(sdo_request);
-    //rc = GM_Sdo_Receive(&sdo_request, 5);
     while(sdo_request.status != P_SDO_SUCCESS){
         if(cnt > max_retry){
             return -1;

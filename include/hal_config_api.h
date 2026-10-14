@@ -1,7 +1,7 @@
 #pragma once
 #include "hal_types.h"
 
-/* 非零即失败。0x01xx 那几个是运行期/总线类，其余是调用与配置类。 */
+/* 非零即失败。0x01xx 为运行期/总线类，其余为调用与配置类。 */
 #define HAL_OK                0       /* 成功 */
 #define HAL_ERROR_ARGUMENT    0x0009  /* 参数无效：context 为空、轴号不存在、入参越界或非有限值 */
 #define HAL_ERROR_ABI         0x000A  /* ABI 不匹配：abi_major/minor、struct_size 或 reserved 与头文件不符 */
@@ -13,13 +13,13 @@
 #define HAL_ERROR_STATE       0x0001  /* 调用顺序错误，phase 不对：write_* 要在 begin 与 commit 之间；wait 要求上一拍已 commit */
 #define HAL_ERROR_MEMORY      0x000C  /* 内存分配失败（context 或内部缓冲） */
 #define HAL_ERROR_TIMEOUT     0x0104  /* 启动总预算耗尽：等主站/状态机就位超时 */
-#define HAL_ERROR_UNSUPPORTED 0x0105  /* 设备不支持该功能：PDO 没绑或位长不合规、定向没配。**不静默当成功** */
+#define HAL_ERROR_UNSUPPORTED 0x0105  /* 设备不支持该功能：PDO 没绑或位长不合规、定向没配。不静默当成功 */
 #define HAL_ERROR_NOT_ENABLED   0x0106  /* 轴尚未使能，或状态机还没到位。写指令被拒，等使能/等状态机 */
 #define HAL_ERROR_MODE_MISMATCH 0x0107  /* 运行模式未到位：实际或期望模式不是该指令要求的 CSP（写位置）或 CSV（写转速） */
 #define HAL_READY_PHASE        0x01u  /* 不在 begin 与 commit 之间（调用时机错） */
 #define HAL_READY_NOT_ENABLED  0x02u  /* 尚未到 OperationEnabled */
 #define HAL_READY_NOT_READY    0x04u  /* 状态机或采样未到位 */
-#define HAL_READY_MODE_ACTUAL  0x10u  /* 驱动器实际模式（0x6061）还没跟上 HAL 要求的模式——切换还没生效 */
+#define HAL_READY_MODE_ACTUAL  0x10u  /* 驱动器实际模式（0x6061）还没跟上 HAL 要求的模式 */
 
 /* 以下为复位状态 */
 #define HAL_RESET_NONE     0   /* 无复位请求，或被显式停止取消；不表示复位成功 */

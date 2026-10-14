@@ -10,19 +10,17 @@
 #include "slave_list.h"
 #include "export.h"
 
-/* =============== 主站启动配置 =============== */
-
 #define GM_MIN_CYCLE_US 250     /* GM_Master_Set_Cycle 支持的最小周期 */
 
-/** 主站启动配置 —— ethercat_init() 的入参。机床/现场相关的参数都从这儿走。 */
+/** 主站启动配置 —— ethercat_init() 的入参。 */
 typedef struct {
     uint32_t cycle_us;        /* 通讯周期（us），下限 GM_MIN_CYCLE_US */
     uint32_t start_timeout_ms; /* 启动总预算；SDK 秒粒度等待向上取整 */
-    uint32_t cycle_timeout_ms; /* 毫秒；SDK 秒粒度等待向上取整 */
+    uint32_t cycle_timeout_ms; /* 收帧等待超时（ms）；SDK 秒粒度等待向上取整 */
     int      dc_enable;       /* 是否使能 DC 信号（分布式时钟） */
 } MasterConfig;
 
-/* 不知道填什么就用它：MasterConfig cfg = MASTER_CONFIG_DEFAULT; */
+/* 默认配置：MasterConfig cfg = MASTER_CONFIG_DEFAULT; */
 #define MASTER_CONFIG_DEFAULT                                       \
     { .cycle_us = 1000u, .start_timeout_ms = 120000u, .cycle_timeout_ms = 5000u, \
       .dc_enable = 1 }
@@ -33,25 +31,20 @@ typedef struct {
 const char* Master_StartupError(void);
 int Master_SlaveCount(void);
 /* 打断标志的取址与查询：device.c 的 EEPROM / PDO 映射读取要用，才能被停下来。 */
+
 int* Master_InterruptFlag(void);
 int  Master_Interrupted(void);
 
-/* 设备字典路径：优先使用 CNC_HAL_DEVICES_JSON 环境变量；未设置时使用
- * 构建时指定的安装路径。直接编译源码而未指定默认路径时必须设置环境变量。
+/* 设备字典路径：取 CNC_HAL_DEVICES_JSON 环境变量，未设置时用构建期指定的安装路径。
  * 加载失败会阻止主站启动。 */
 #ifndef DEVICES_JSON_PATH
 #define DEVICES_JSON_PATH NULL
 #endif
 
-/* =============== 开发期开关，上机前保持默认 =============== */
-
 #define PARAM_CHANG 0          /* 是否修改主站参数 */
 
-/* 握手前的 REG/SDO 交互窗口（GM_Wait_Pilot_Data_Response）——主站 OP 之后、
- * 握手之前。设备参数（SDO）下发应落在这里。尚未实现。 */
+/* 握手前的 REG/SDO 交互窗口（GM_Wait_Pilot_Data_Response）；尚未实现。 */
 #define OP_PRE_REG_EN 0
-
-/* =============== 错误上下文 =============== */
 
 typedef struct {
     int Model;      /* 报错模块 */
@@ -82,7 +75,6 @@ typedef enum _EcatMasterError
 
 extern int slave_num;
 
-/* =============== 对外接口 =============== */
 
 /** @brief 启动主站到「周期收发模式可用」。
  *  @param cfg  主站配置（周期、毫秒超时、DC）；资源申请由驱动决定
@@ -94,12 +86,12 @@ MASTER_API int ethercat_init(const MasterConfig* cfg);
 MASTER_API int ethercat_close(void);
 
 /** @brief 等本周期节拍并收一帧——周期里唯一的阻塞点。
- *  @note  只在实时线程调用。超时用 MasterConfig.cycle_timeout_ms。
+ *  @note  只在实时线程调用；超时用 MasterConfig.cycle_timeout_ms。
  *  @return 0 成功；< 0 = 等节拍超时或收帧失败 */
 MASTER_API int Master_WaitCycle(void);
 
-/** @brief 下发本帧输出。只把已写入的 PDO 发出去，不做任何计算。
- *  @note  只在实时线程调用。标准周期：WaitCycle → 读写 → CommitCycle。
+/** @brief 下发本帧输出：只把已写入的 PDO 发出去，不做计算。
+ *  @note  只在实时线程调用；标准周期 WaitCycle → 读写 → CommitCycle。
  *  @return 0 成功；< 0 失败 */
 MASTER_API int Master_CommitCycle(void);
 
@@ -125,8 +117,8 @@ typedef struct {
     unsigned expect_wkc_rx;        /* 期望工作计数器（Rx 侧） */
 } MasterBusHealth;
 
-/** @brief 取最近一次收帧的总线健康快照。只记录不判断，报警策略归上层。
- *  @param out  带出快照；还没收过帧时全零
+/** @brief 取最近一次收帧的总线健康快照：只记录不判断，报警策略归上层。
+ *  @param out  带出快照；未收过帧时全零
  *  @return 0 成功；< 0 = out 为空 */
 MASTER_API int Master_BusHealth(MasterBusHealth* out);
 

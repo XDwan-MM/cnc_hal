@@ -7,11 +7,8 @@
 extern "C" {
 #endif
 
-/* 按【槽】索引的设备表 —— 本层对 HAL 的取数口。
- *
- * 按槽不按从站：一台从站可含多根轴（格力 axis6 占 6 槽），HAL 关心的是轴。
- * 装配后建表一次，之后只读。带 tag 和身份——这两样正是 g_device_data 那个
- * 无 tag union 缺的：光看字节分不出是伺服、面板还是 IO 模块。 */
+/* 按【槽】索引的设备表 —— 本层对 HAL 的取数口。按槽不按从站：一台从站可含多根轴
+ * （格力 axis6 占 6 槽），HAL 关心的是轴。装配后建表一次，之后只读；带 type 与身份。 */
 
 #define DEV_SLOT_NAME_LEN 64
 
@@ -26,13 +23,13 @@ typedef struct {
     uint32_t serial;
     char     name[DEV_SLOT_NAME_LEN];   /* 设备字典里的名称；未命中为空串 */
 
-    /* Entry 句柄快照，按 type 取 entries.slave / .control / .io。装配时填好，之后不变。 */
+    /* Entry 句柄快照，按 type 取 entries.slave / .control / .io；装配时填好，之后不变。 */
     device_data_t entries;
 } DeviceSlot;
 
 /** @brief 建表。装配完成后调一次（device_match 之后、握手之前）。
  *  @param slave_num  从站数
- *  @return 实际槽数（<= MAX_DEVICE_NUM）；负数表示容量或参数错误 */
+ *  @return 实际槽数（<= MAX_DEVICE_NUM）；< 0 = 容量或参数错误 */
 int DeviceTable_Build(int slave_num);
 void DeviceTable_Reset(void);
 int DeviceTable_IsServo(int slot);

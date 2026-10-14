@@ -8,9 +8,6 @@
 #include "/opt/GreeMaster/include/libGREEMASTER/GreeMasterAPI.h"
 #include "/opt/GreeMaster/include/libGREEMASTER/gm_errcode.h"
 
-/* 错误检查宏不在这里：本层在 main_demo.c 里按「各阶段共用一份启动预算」的需要
- * 重定义了 CHECK_RC。device.h 旧版那个与它语义不同、且全仓库无人使用，已删除。 */
-
 typedef struct{
    int slave_pos;
    int slave_total;
@@ -21,28 +18,22 @@ typedef struct{
    int type;
 }DEVICE_BASIC_INFO;
 
-// 宏定义
-#define EEPROM_FIXED_WORDS      64  // 【关键修正】64 Words = 128 Bytes
+#define EEPROM_FIXED_WORDS      64  // Word 数（128 Bytes）
 #define WORD_TO_BYTES(w)        ((w) * 2)
-// 类型标识
 #define TYPE_END                0xFFFF
 #define TYPE_TX_PDO             0x0032
 #define TYPE_RX_PDO             0x0033
 #define TYPE_SyncM              0x0029
 #define DC_MODE                 0x003C
-#define MAX_PDO_COUNT           10   // 假设最多有10个有效PDOentry
-#define MAX_ENTRY_PER_PDO       20   // 假设每个 PDO 最多 20 个条目
+#define MAX_PDO_COUNT           10   // 最多有效 PDO Entry 数
+#define MAX_ENTRY_PER_PDO       20   // 每个 PDO 最多条目数
 
-// 紧凑结构体 (禁止填充)
 typedef struct {
     unsigned short int type;      // 数据类型 (Word 1)
-    unsigned short int length;    // 数据内容长度 (Word 2)。**单位是 Word，不是字节**：字节数 = 该值 × 2
+    unsigned short int length;    // 内容长度：**单位 Word**，字节数 = 该值 × 2
 } ECAT_EEPROM_CLASS_HEADER;
 
-// 1. PDO 头部结构
-// 布局：PDO_ENTRY(2B), EntryCount(1B), SM(1B), DCRef(1B), NameIdx(1B), Flags(2B)
-// 总大小：8 Bytes
-// 2. PDO 头部结构 (紧跟在分类头之后，8 Bytes)
+// PDO 块头，8 Bytes：PDO_ENTRY(2B) EntryCount(1B) SM(1B) DCRef(1B) NameIdx(1B) Flags(2B)
 typedef struct {
     unsigned short int pdoEntry;      // PDO Entry 值 (如 0x1B00)
     unsigned char entryCount;    // 条目数目 (如 12)
@@ -52,30 +43,30 @@ typedef struct {
     unsigned short int flags;         // Flags
 } PDO_BLOCK_HEADER;
 
-// 3. 条目 (Entry) 结构 (每个 8 Bytes)
+// 条目，每个 8 Bytes
 typedef struct {
-    unsigned short int index;         // 对象字典值
-    unsigned char subIndex;      // 子对象字典值
+    unsigned short int index;         // 对象字典索引
+    unsigned char subIndex;      // 子索引
     unsigned char nameIdx;       // NameIdx
     unsigned char dataType;      // 数据类型
-    unsigned char bitLen;        // 数据长度/位长
+    unsigned char bitLen;        // 位长
     unsigned short int flags;         // Flags
 } PDO_ENTRY_ITEM;
 
-// 4. 结果容器
+// 解析结果容器
 typedef struct {
-    PDO_BLOCK_HEADER headerInfo; // 存储有效 PDO 的头部信息
-    PDO_ENTRY_ITEM entries[MAX_ENTRY_PER_PDO];  // 存储有效条目
+    PDO_BLOCK_HEADER headerInfo; 
+    PDO_ENTRY_ITEM entries[MAX_ENTRY_PER_PDO];  
     int entryCount;                // 实际条目数
 } VALID_PDO_INFO;
 
 typedef struct {
     VALID_PDO_INFO validPdos[MAX_PDO_COUNT];
-    int count; //有效pdo_entry数
+    int count; // 有效 PDO 数
 } PDO_RESULT;
 
-/* 同步管理器块总结构体 (包含 SM0 - SM3) */
-#pragma pack(push, 1)  // 将对齐方式压栈并设置为 1 字节（紧凑排列）
+/* 同步管理器块 (SM0 - SM3)，1 字节对齐 */
+#pragma pack(push, 1)  
 
 typedef struct {
     unsigned short int wPhysAddr;      // 2 Bytes
@@ -92,7 +83,7 @@ typedef struct {
     ECAT_SYNC_MANAGER_CFG sm3;
 } ECAT_SYNC_M_INFO;
 
-#pragma pack(pop)  // 恢复之前的对齐设置
+#pragma pack(pop)  
 
 
 
@@ -106,10 +97,7 @@ typedef enum {
     UNKNOWN_TYPE
 } DEVICE_TYPE;
 
-/* 设备类型不再用硬编码表匹配——改查设备字典（devdict + devices.json，
- * 见 src/Greemaster/devices.json）。匹配逻辑在 get_device_types_from_info()。 */
-
-#define MAX_DEVICE_NUM 30   //假设最多 30 个设备
+#define MAX_DEVICE_NUM 30   // 从站/槽容量上限
 typedef struct {
     TxEntry_Unit statusWord;
     TxEntry_Unit act_pos;
@@ -138,14 +126,14 @@ typedef struct {
     uint8_t io_in_count;
 }io_addr;
 
-// 统一的联合体：所有设备数据结构的“容器”
+// 所有设备数据结构的容器（按 type 取成员）
 typedef union {
     slave_addr      slave;
     control_addr    control;
     io_addr         io;
 } device_data_t;
 
-// 用于存储查找请求和结果的结构体
+// PDO 对象查找请求与结果
 typedef struct {
     uint16_t index;       // pdo_entry_index
     uint8_t subindex;     // pdo_entry_subindex
@@ -153,20 +141,20 @@ typedef struct {
     uint32_t entrypos;    // 匹配结果：条目在 PDO 中的位置
 } pdo_lookup_result;
 
-extern device_data_t g_device_data[MAX_DEVICE_NUM];  // 假设最多 30 个设备
-// 辅助结构体：用于定义需要添加的目标
+extern device_data_t g_device_data[MAX_DEVICE_NUM];  // 按【槽】索引
+// 待查对象的目标描述
 typedef struct {
     uint16_t index;
     uint8_t subIndex;
     uint8_t bitLen;
 } TARGET_ENTRY;
 
-/* 一台从站在 g_device_data 里占几个槽（多轴驱动器占多个：axis6→6，axis4→4）。
- * 装配与建表两处都必须走这个规则，各写一遍就会整体错位，而且不报错。 */
+/* 一台从站占几个槽（多轴驱动器占多个：axis6→6，axis4→4）。
+ * 装配与建表必须走同一规则；各写一遍会整体错位且不报错。 */
 int device_slot_count(DEVICE_TYPE type);
 void device_reset(void);
 
-/* 某台从站的 EEPROM 身份（按【从站号】索引）。越界返回一个全零的静态对象。 */
+/* 某台从站的 EEPROM 身份（按【从站号】索引）；越界返回全零静态对象。 */
 const DEVICE_BASIC_INFO* device_identity_get(int slave_pos);
 
 int get_device_info_from_eeprom(int slave_num, DEVICE_TYPE* types,

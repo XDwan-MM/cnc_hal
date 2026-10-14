@@ -1,6 +1,5 @@
-// devdict.c — 设备字典 JSON 读取器（自包含，严格 C99，无 cJSON 依赖）
-// 内置一个仅覆盖所需语法的最小 JSON 解析器 + schema 走查 + 两级匹配。
-// 全静态存储、启动时一次加载、单线程使用——见 devdict.h 顶部说明。
+// devdict.c — 设备字典 JSON 读取器（自包含，无 cJSON 依赖）：最小 JSON 解析器
+// + schema 走查 + 两级匹配。全静态存储、启动时一次加载、单线程使用。
 #include "devdict.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -16,38 +15,30 @@ enum JType { JV_OBJ, JV_ARR, JV_STR, JV_NUM, JV_LIT };   // LIT: true/false/null
 
 typedef struct JNode {
     enum JType type;
-    char* key;            // 所在父对象里的键（数组元素为 NULL）
+    char* key;            // 所在父对象的键；数组元素为 NULL
     char* str;            // JV_STR
-    long long num;        // JV_NUM / JV_LIT(true=1, false/null=0)
-    struct JNode* child;  // OBJ/ARR 第一个子节点
-    struct JNode* next;   // 兄弟节点
+    long long num;        // JV_NUM / JV_LIT（true=1，false/null=0）
+    struct JNode* child;  // 第一个子节点
+    struct JNode* next;   // 下一个兄弟
 } JNode;
 
 typedef struct {
     const char* s;
     size_t pos;
     size_t len;
-    char err[96];
-    int depth;
+    char err[96];         // 第一条解析错误（含字符偏移）
+    int depth;            // 当前嵌套深度，上限 JD_MAX_DEPTH
 } JP;
 
 #define JD_MAX_DEPTH 16
 
-/**
- * @brief 记录第一条解析错误（含字符偏移），后续错误不覆盖。
- * @note 只记第一条——JSON 语法错往往连环报，第一条最有参考价值。
- */
+/* 记录第一条解析错误（含字符偏移），后续错误不覆盖。 */
 static void jfail(JP* p, const char* msg) {
     if (p->err[0] == '\0')
         snprintf(p->err, sizeof(p->err), "%s (偏移 %d)", msg, (int)p->pos);
 }
 
-/**
- * @brief 跳过空白与注释。
- * @note 支持 `//` 行注释与块注释——这是**对 JSON 的扩展**，为的是让
- *       手编的字典文件能写说明。标准 JSON 不支持注释，换 cJSON 实现时
- *       需要把这个扩展一起带过去，否则原有字典文件会解析失败。
- */
+/* 跳过空白与注释（`//` 行注释与块注释是对 JSON 的扩展，换实现须一并保留）。 */
 static void jskip(JP* p) {
     while (p->pos < p->len) {
         const char c = p->s[p->pos];
@@ -73,18 +64,13 @@ static void jskip(JP* p) {
     }
 }
 
-/**
- * @brief 看下一个有效字符（先跳过空白/注释），不消费。
- * @return 字符；已到结尾返回 -1。
- */
+/* 看下一个有效字符（先跳过空白/注释），不消费；已到结尾返回 -1。 */
 static int jpeek(JP* p) {
     jskip(p);
     return p->pos < p->len ? (unsigned char)p->s[p->pos] : -1;
 }
 
-/**
- * @brief 若下一个有效字符是 c 则消费并返回 1，否则返回 0（不消费）。
- */
+/* 下一个有效字符是 c 则消费并返回 1，否则返回 0（不消费）。 */
 static int jmatch(JP* p, char c) {
     if (jpeek(p) == (unsigned char)c) { ++p->pos; return 1; }
     return 0;
@@ -170,11 +156,7 @@ invalid:
     return NULL;
 }
 
-/**
- * @brief 分配一个 AST 节点并初始化各字段为 NULL/0。
- * @return 节点；内存不足返回 NULL。
- * @note 字典只在启动期 Load 一次，这里的 malloc 不在周期路径上。
- */
+/* 分配并清零一个 AST 节点；内存不足返回 NULL。字典只在启动期 Load 一次。 */
 static JNode* jnew(enum JType t) {
     JNode* n = (JNode*)malloc(sizeof(JNode));
     if (!n) return NULL;
@@ -183,10 +165,7 @@ static JNode* jnew(enum JType t) {
     return n;
 }
 
-/**
- * @brief 递归释放以 n 为头的一条兄弟链（含各自子树）。
- * @note 先取 next 再递归 child，避免释放后访问；入参可为 NULL。
- */
+/* 递归释放以 n 为头的一条兄弟链（含各自子树）；n 可为 NULL。 */
 static void jfree(JNode* n) {
     while (n) {
         JNode* nx = n->next;
@@ -200,14 +179,9 @@ static void jfree(JNode* n) {
 
 static JNode* jparse_value(JP* p, char* key);
 
-/**
- * @brief 解析对象或数组（两者共用同一套节点结构：child 串成链表）。
- * @param p     [in,out] 解析器状态。
- * @param isObj 1=对象 `{...}`（元素带 key），0=数组 `[...]`（key 为 NULL）。
- * @param key   本节点自身的键名（由调用方传入并接管所有权）；根节点传 NULL。
- * @return 节点；语法错或内存不足返回 NULL（错误已记进 p->err）。
- * @note 深度上限 JD_MAX_DEPTH，超限即失败——防畸形文件把栈打爆。
- */
+/* 解析对象或数组（共用节点结构：child 串成链表）。isObj 1=对象（元素带 key），
+ * 0=数组（key 为 NULL）；key 为自身键名，由本函数接管所有权，根节点传 NULL。
+ * 语法错或内存不足返回 NULL（错误记进 p->err）；深度上限 JD_MAX_DEPTH。 */
 static JNode* jparse_obj_or_arr(JP* p, int isObj, char* key) {
     JNode* n = jnew(isObj ? JV_OBJ : JV_ARR);
     if (!n) { jfail(p, "内存不足"); free(key); return NULL; }
@@ -251,11 +225,8 @@ static JNode* jparse_obj_or_arr(JP* p, int isObj, char* key) {
     }
 }
 
-/**
- * @brief 按当前字符分派到 对象/数组/字符串/数字/字面量 的解析。
- * @param key 本节点的键名（非对象成员传 NULL）。
- * @return 节点；语法错返回 NULL。
- */
+/* 按当前字符分派到 对象/数组/字符串/数字/字面量 的解析。
+ * key 为节点键名（非对象成员传 NULL）；语法错返回 NULL。 */
 static JNode* jparse_value(JP* p, char* key) {
     const int c = jpeek(p);
     if (c == '{') return jparse_obj_or_arr(p, 1, key);
@@ -324,10 +295,7 @@ static JNode* jobj_get(JNode* obj, const char* key) {
     return NULL;
 }
 
-/**
- * @brief 数组元素个数（遍历 child 链）。
- * @return 元素数；非数组或 NULL 返回 0。
- */
+/* 数组元素个数；非数组或 NULL 返回 0。 */
 static int jarr_size(JNode* arr) {
     int n = 0;
     JNode* c;
@@ -402,12 +370,8 @@ static const struct { const char* name; DevDictRole role; } kRoleTable[] = {
     { "op_mode",       DEV_DICT_ROLE_OP_MODE },
 };
 
-/**
- * @brief 角色名字符串 → 枚举（字典文件里 objects 的键）。
- * @param role 如 "status_word" / "target_pos"。
- * @return 匹配的角色；未识别返回 DEV_DICT_ROLE_COUNT（调用方据此判错——
- *         写错角色名会让 Load 失败，这是刻意的防笔误设计）。
- */
+/* 角色名字符串（如 "status_word"）→ 枚举；未识别返回 DEV_DICT_ROLE_COUNT，
+ * 调用方据此判错——写错角色名会让 Load 失败。 */
 DevDictRole DevDict_RoleFromString(const char* role) {
     size_t i;
     if (!role) return DEV_DICT_ROLE_COUNT;
@@ -416,8 +380,7 @@ DevDictRole DevDict_RoleFromString(const char* role) {
     return DEV_DICT_ROLE_COUNT;
 }
 
-// 加载失败统一出口：填错误、释放资源
-// （msg 可能与 err 同缓冲——parseObject 已写入 err 时由调用方直接传入，此时跳过拷贝）
+// 加载失败统一出口：填错误、释放资源。msg 可能与 err 同缓冲，此时跳过拷贝。
 static int loadFail(char* err, int errLen, const char* msg, JNode* root, char* text) {
     if (err && errLen > 0 && msg != err) snprintf(err, (size_t)errLen, "%s", msg);
     jfree(root);
@@ -459,7 +422,7 @@ static int entryHasRole(const DevDictEntry* entry, DevDictRole role) {
     return 0;
 }
 
-/* custom 伺服必须能支撑当前 GmServoLink 的使能、位置和速度接口。 */
+/* custom 伺服必须带齐 GmServoLink 使能、位置、速度所需的九个对象。 */
 static int validateCustomServo(const DevDictEntry* entry, int entryIndex,
                                char* err, int errLen) {
     static const DevDictRole required[] = {
@@ -485,22 +448,11 @@ static int validateCustomServo(const DevDictEntry* entry, int entryIndex,
     return 1;
 }
 
-/**
- * @brief 加载并解析设备字典文件（启动时一次）。
- *
- * 流程：读文件 → 最小 JSON 解析器建 AST → 校验 version/devices 结构 →
- * 逐条目提取 (vendor_id, product_code, revision, type, name, profile,
- * objects) 填进静态表 → 释放 AST。
- *
- * @param path   [in]  字典文件路径。
- * @param err    [out] 可选，失败原因（含条目序号/字段名，便于排查手编文件）。
- * @param errLen       err 缓冲区字节数。
- * @return 0 成功；-1 失败（文件不存在 / JSON 语法错 / 字段校验错 / 超容量）。
- *
- * @note **重复调用会先释放上次结果**，可以安全地重载。
- * @note profile "custom" 必须写 objects；"ds402" 用内置标准对象，不可写。
- * @note 全静态存储、无堆常驻（AST 解析完即释放），单线程使用。
- */
+/* 加载并解析设备字典文件（启动时一次）。
+ * err/errLen 可选，失败原因含条目序号与字段名。返回 0 成功，-1 失败
+ * （文件不存在 / JSON 语法错 / 字段校验错 / 超容量）。
+ * 重复调用会先释放上次结果，可安全重载；全静态存储、无堆常驻、单线程使用。
+ * profile "custom" 必须写 objects，"ds402" 用内置标准对象且不可写。 */
 int DevDict_Load(const char* path, char* err, int errLen) {
     FILE* f = NULL;
     long sz = 0;
@@ -518,7 +470,7 @@ int DevDict_Load(const char* path, char* err, int errLen) {
         return -1;
     }
 
-    // 读整个文件（上限 1MB——字典是手编小文件）
+    // 读整个文件（上限 1MB）
     f = fopen(path, "rb");
     if (!f) {
         if (err && errLen > 0) snprintf(err, (size_t)errLen, "无法打开 %s", path);
@@ -660,9 +612,7 @@ int DevDict_Load(const char* path, char* err, int errLen) {
                 (servo == (strcmp(dst->profile, "none") == 0)))
                 return loadFail(err, errLen, "设备 type/profile 不匹配", root, text);
 
-            // objects：只有 custom 能写（且必写）。
-            //   ds402 —— 用内置标准 DS402 对象号
-            //   none  —— 本字典不提供对象映射；面板/IO 按位置建句柄，非标多轴在代码里
+            // objects：只有 custom 能写且必写；ds402 用内置对象号，none 不提供映射
             dst->object_count = 0;
             objs = jobj_get(e, "objects");
             if (strcmp(dst->profile, "custom") == 0 && !objs) {
@@ -717,7 +667,7 @@ int DevDict_Load(const char* path, char* err, int errLen) {
         }
     }
 
-    // ---- 提交（覆盖上次加载）----
+    // ---- 提交 ----
     g_store = st;
     jfree(root);
     free(text);
@@ -728,7 +678,7 @@ int DevDict_Lookup(uint32_t vendor, uint32_t product, uint32_t revision,
                    DevDictEntry* out) {
     int pass = 0, i = 0;
     if (!out) return 0;
-    // 两轮匹配：先精确 revision，再通配
+    // 两轮匹配：pass 0 精确 revision，pass 1 通配
     for (pass = 0; pass < 2; ++pass) {
         for (i = 0; i < g_store.count; ++i) {
             const DictKey* k = &g_store.keys[i];
@@ -755,24 +705,16 @@ int DevDict_FindObject(const DevDictEntry* entry, DevDictRole role,
     return 0;
 }
 
-/**
- * @brief 已加载的条目数（诊断用）。
- * @return 条目数；未加载或加载失败为 0。
- */
+/* 已加载的条目数（诊断用）；未加载或加载失败为 0。 */
 int DevDict_EntryCount(void) {
     return g_store.count;
 }
 
-/**
- * @brief 释放内部数据（退出时调用）。
- * @note 不调用也没有泄漏危害——数据是静态存储的。提供它主要是为了
- *       支持"重载"语义与干净退出。
- */
+/* 释放内部数据（退出时调用）。数据是静态存储，不调用也无泄漏危害。 */
 void DevDict_Unload(void) {
     g_store.count = 0;
 }
 
 // ============================================================
-// 说明：本实现刻意不用第三方 JSON 库——自包含可测、无版本耦合；
-// 若封装侧希望统一用其 cJSON，DevDict_* 接口保持不变、换实现即可。
+// 实现刻意不用第三方 JSON 库；DevDict_* 接口不变，换实现即可。
 // ============================================================

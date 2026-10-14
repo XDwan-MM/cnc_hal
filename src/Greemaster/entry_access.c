@@ -2,9 +2,8 @@
 #include "device.h"
 #include "device_table.h"
 
-/* 取语义角色对应的 Entry 句柄地址。返回 NULL = 该角色没绑。
- * 「没绑」用 bit_length == 0 判定：g_device_data 是零初始化的，
- * 真正绑上的 Entry 位长必在 1..32 之间。 */
+/* 取语义角色对应的 Entry 句柄地址；NULL = 该角色没绑。
+ * 「没绑」以 bit_length == 0 判定：g_device_data 零初始化，绑上的位长必在 1..32。 */
 static void* servo_entry(int slot, DevDictRole role, int* is_tx) {
     if (!DeviceTable_IsServo(slot)) return NULL;
 
@@ -58,11 +57,7 @@ MASTER_API int Master_ServoWrite(int slot, DevDictRole role, uint32_t value) {
 }
 
 /* 词设备的有效词数与种类（面板 / IO 模块的 union 成员不同）。
- *
- * 注意这一层存在**两个来源**：数量取自 DeviceTable 里的快照（DeviceTable_Build
- * 把 g_device_data[slot] 整份拷进 DeviceSlot.entries），而下面的读写句柄直接取
- * g_device_data[slot]。今天两者一致，但任何一处改了而另一处没跟上就会静默错位——
- * 正是这一层最怕的「整体错位而且不报错」。改动时务必同时看这两处。 */
+ * 数量取自 DeviceTable 快照，下面的读写句柄直接取 g_device_data[slot]；两处改动必须同步。 */
 static int io_info(int slot, int* out_n, int* in_n, int* is_panel) {
     const DeviceSlot* slots = NULL;
     const int n = DeviceTable_Get(&slots);
@@ -113,8 +108,7 @@ MASTER_API int Master_IoWriteEntry(int slot, int index, uint32_t value) {
                                     : g_device_data[slot].io.io_output_addr[index];
     if (h.bit_length == 0 || h.bit_length > 32) return -1;
 
-    /* 按实际位长掩码：多出来的高位不该冲掉邻居。
-     * bit_length == 32 时 1u<<32 是未定义行为，单独处理。 */
+    /* 按实际位长掩码，不让高位冲掉邻居；bit_length == 32 时 1u<<32 未定义，单独处理。 */
     const uint32_t mask = (h.bit_length >= 32) ? 0xFFFFFFFFu
                                                : ((1u << h.bit_length) - 1u);
     return (GM_RxPdoEntry_Write(h, value & mask) != 0) ? -1 : 0;

@@ -1,5 +1,5 @@
 #include "slave_list.h"
-Slave_info* slave_list = NULL;          // 定义从站信息结构体以存储解析结果
+Slave_info* slave_list = NULL;          // 解析出的从站链头
 
 
 Slave_info* create_empty_slave(uint32_t pos) {
@@ -12,7 +12,7 @@ sm_info* create_empty_sm(void) { return calloc(1, sizeof(sm_info)); }
 pdo_info* create_empty_pdo(void) { return calloc(1, sizeof(pdo_info)); }
 pdo_entry_info* create_empty_pdo_entry(void) { return calloc(1, sizeof(pdo_entry_info)); }
 
-/* 仅释放本层以 calloc 创建的映射链。 */
+/* 释放本层 calloc 创建的整条映射链（Slave → SM → PDO → Entry）。 */
 void free_slave_chain(Slave_info* slave) {
     while (slave) {
         Slave_info* next_slave = slave->next;
@@ -41,9 +41,7 @@ void free_slave_chain(Slave_info* slave) {
 
 // ================= 专用链表追加操作 =================
 
-/**
- * @brief 将新 Slave 添加到全局链表尾部
- */
+/* 新 Slave 追加到全局链表尾部。 */
 void add_slave_to_global_list(Slave_info* new_slave) {
     if (!new_slave) return;
     
@@ -58,9 +56,7 @@ void add_slave_to_global_list(Slave_info* new_slave) {
     }
 }
 
-/**
- * @brief 将新 SM 添加到指定 Slave 的 SM 链表尾部
- */
+/* 新 SM 追加到指定 Slave 的链表尾部。 */
 void add_sm_to_slave(Slave_info* slave, sm_info* new_sm) {
     if (!slave || !new_sm) return;
 
@@ -75,9 +71,7 @@ void add_sm_to_slave(Slave_info* slave, sm_info* new_sm) {
     }
 }
 
-/**
- * @brief 将新 PDO 添加到指定 SM 的 PDO 链表尾部
- */
+/* 新 PDO 追加到指定 SM 的链表尾部。 */
 void add_pdo_to_sm(sm_info* sm, pdo_info* new_pdo) {
     if (!sm || !new_pdo) return;
 
@@ -92,9 +86,7 @@ void add_pdo_to_sm(sm_info* sm, pdo_info* new_pdo) {
     }
 }
 
-/**
- * @brief 添加 PDO Entry 并返回新创建的节点指针
- */
+/* 添加 PDO Entry，返回新节点指针；失败返回 NULL。 */
 pdo_entry_info* add_pdo_entry_to_pdo(pdo_info* pdo, uint16_t index, uint8_t subindex, 
                                      uint8_t bit_len, uint32_t bit_pos, uint32_t bit_offset_sm) {
     pdo_entry_info* new_entry = create_empty_pdo_entry();
