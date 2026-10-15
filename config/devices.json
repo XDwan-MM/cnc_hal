@@ -33,6 +33,7 @@
     { "vendor_id": 1717,       "product_code": 1026,       "revision": 268435457, "type": "servo", "profile": "ds402", "name": "GHSD" },
     { "vendor_id": 1710,       "product_code": 131073,     "revision": 65536,     "type": "servo", "profile": "ds402", "name": "SPS_ECAT_CoE_02" },
     { "vendor_id": 1337,       "product_code": 35652353,   "revision": 268435456, "type": "servo", "profile": "ds402", "name": "SGD7S" },
-    { "vendor_id": 2252,       "product_code": 2973639698, "revision": 1,         "type": "gree4", "profile": "none",  "name": "Gree axis4 Servo Driver" }
+    { "vendor_id": 2252,       "product_code": 2973639698, "revision": 1,         "type": "gree4", "profile": "none",  "name": "Gree axis4 Servo Driver" },
+    { "vendor_id": 5596774,    "product_code": 40200,      "revision": 2024032400,"type": "servo", "profile": "ds402", "name": "Blue" }
   ]
 }
