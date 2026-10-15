@@ -2,6 +2,10 @@
 #include <string.h>
 
 int main(void) {
+    int32_t state, result;
+    if (hal_rt_spindle_prepare_csp(NULL, 0, 100) != HAL_ERROR_ARGUMENT ||
+        hal_rt_spindle_prepare_csp_state(NULL, 0, &state, &result) != HAL_ERROR_ARGUMENT)
+        return 1;
     HalCConfig cfg;
     memset(&cfg, 0, sizeof(cfg));
     cfg.abi_major = HAL_C_ABI_MAJOR;

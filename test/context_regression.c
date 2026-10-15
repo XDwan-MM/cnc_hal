@@ -1551,6 +1551,104 @@ static void stopped_orientation_does_not_resume(void) {
     }
 }
 
+static void spindle_prepare_csp(void) {
+    HalCConfig cfg = config();
+    HalContext* c = create(&cfg);
+    CHECK(hal_context_start(c, NULL, 0) == HAL_OK);
+    int32_t state, result;
+    CHECK(hal_rt_spindle_prepare_csp(c, 3, 100) == HAL_ERROR_NOT_RUNNING);
+    enable(c);
+    servo[0][DEV_DICT_ROLE_ACTUAL_SPEED] = 100;
+    begin(c);
+    CHECK(hal_rt_spindle_prepare_csp(c, 7, 100) == HAL_ERROR_ARGUMENT);
+    CHECK(hal_rt_spindle_prepare_csp(c, 3, 0) == HAL_ERROR_ARGUMENT);
+    CHECK(hal_rt_axis_set_pos(c, 3, 125) == HAL_OK);
+    CHECK(hal_rt_spindle_write_speed(c, 3, 100, 1) == HAL_OK);
+    CHECK(hal_rt_spindle_prepare_csp(c, 3, 100) == HAL_OK);
+    CHECK(hal_rt_spindle_prepare_csp(c, 3, 1000) == HAL_ERROR_BUSY);
+    CHECK(hal_rt_spindle_write_speed(c, 3, 10, 1) == HAL_ERROR_BUSY);
+    CHECK(hal_rt_spindle_write_pos(c, 3, 10) == HAL_ERROR_BUSY);
+    CHECK(hal_rt_axis_set_pos(c, 3, 0) == HAL_ERROR_BUSY);
+    CHECK(hal_rt_spindle_request_mode(c, 3, HAL_SPINDLE_CSP) == HAL_ERROR_BUSY);
+    CHECK(hal_rt_spindle_request_orient(c, 3) == HAL_ERROR_BUSY);
+    CHECK(hal_rt_commit_cycle(c) == HAL_OK);
+    CHECK(servo[0][DEV_DICT_ROLE_TARGET_SPEED] == 0);
+    for (int i = 0; i < 12; ++i) cycle(c);
+    CHECK(hal_rt_spindle_prepare_csp_state(c, 3, &state, &result) == HAL_OK);
+    CHECK(state == HAL_CSP_PREPARE_STOPPING && result == HAL_ERROR_BUSY);
+    CHECK(servo[0][DEV_DICT_ROLE_OP_MODE] == DS402_MODE_CSV);
+    servo[0][DEV_DICT_ROLE_ACTUAL_SPEED] = 0;
+    for (int i = 0; i < 35; ++i) {
+        cycle(c);
+        CHECK(servo[0][DEV_DICT_ROLE_CONTROL_WORD] != 0x040f);
+    }
+    CHECK(hal_rt_spindle_prepare_csp_state(c, 3, &state, &result) == HAL_OK);
+    CHECK(state == HAL_CSP_PREPARE_DONE && result == HAL_OK);
+    HalCAxisStatus axis;
+    CHECK(hal_rt_axis_read_status(c, 3, &axis) == HAL_OK);
+    CHECK(axis.enabled && axis.actual_pos == 125 && axis.command_pos == 125);
+    CHECK(servo[0][DEV_DICT_ROLE_TARGET_POS] == 50); /* Separate command/feedback scales. */
+    begin(c);
+    CHECK(hal_rt_spindle_prepare_csp(c, 3, 100) == HAL_OK);
+    CHECK(hal_rt_spindle_estop(c, 3) == HAL_OK);
+    CHECK(hal_rt_spindle_prepare_csp_state(c, 3, &state, &result) == HAL_OK);
+    CHECK(state == HAL_CSP_PREPARE_CANCELLED && result == HAL_ERROR_STOPPED);
+    CHECK(hal_rt_spindle_prepare_csp(c, 3, 100) == HAL_ERROR_NOT_RUNNING);
+    CHECK(hal_rt_commit_cycle(c) == HAL_OK);
+    hal_context_destroy(c);
+
+    c = create(&cfg);
+    CHECK(hal_context_start(c, NULL, 0) == HAL_OK);
+    begin(c); /* Cold, disabled CSV must also prepare successfully. */
+    CHECK(hal_rt_spindle_prepare_csp(c, 3, 100) == HAL_OK);
+    CHECK(hal_rt_commit_cycle(c) == HAL_OK);
+    for (int i = 0; i < 40; ++i) cycle(c);
+    CHECK(hal_rt_spindle_prepare_csp_state(c, 3, &state, &result) == HAL_OK);
+    CHECK(state == HAL_CSP_PREPARE_DONE);
+    servo[0][DEV_DICT_ROLE_ACTUAL_SPEED] = 10;
+    begin(c);
+    CHECK(hal_rt_spindle_prepare_csp(c, 3, 100) == HAL_ERROR_BUSY);
+    CHECK(hal_rt_commit_cycle(c) == HAL_OK);
+    hal_context_destroy(c);
+
+    for (int fault = 0; fault < 2; ++fault) {
+        c = create(&cfg);
+        CHECK(hal_context_start(c, NULL, 0) == HAL_OK);
+        enable(c);
+        servo[0][DEV_DICT_ROLE_ACTUAL_SPEED] = (uint32_t)-100;
+        begin(c);
+        CHECK(hal_rt_spindle_prepare_csp(c, 3, 5) == HAL_OK);
+        CHECK(hal_rt_commit_cycle(c) == HAL_OK);
+        if (fault) servo[0][DEV_DICT_ROLE_ERROR_CODE] = 0xff43;
+        for (int i = 0; i < 7; ++i) cycle(c);
+        CHECK(hal_rt_spindle_prepare_csp_state(c, 3, &state, &result) == HAL_OK);
+        CHECK(state == HAL_CSP_PREPARE_ERROR);
+        CHECK(result == (fault ? HAL_ERROR_NOT_RUNNING : HAL_ERROR_TIMEOUT));
+        CHECK(servo[0][DEV_DICT_ROLE_TARGET_SPEED] == 0);
+        CHECK(servo[0][DEV_DICT_ROLE_CONTROL_WORD] == DS402_CW_SWITCH_ON);
+        hal_context_destroy(c);
+    }
+    for (int reset = 0; reset < 2; ++reset) {
+        c = create(&cfg);
+        CHECK(hal_context_start(c, NULL, 0) == HAL_OK);
+        begin(c);
+        CHECK(hal_rt_spindle_prepare_csp(c, 3, 100) == HAL_OK);
+        CHECK((reset ? hal_rt_axis_fault_reset(c, 3) :
+                       hal_rt_spindle_enable(c, 3, 0)) == HAL_OK);
+        CHECK(hal_rt_spindle_prepare_csp_state(c, 3, &state, &result) == HAL_OK);
+        CHECK(state == HAL_CSP_PREPARE_CANCELLED);
+        CHECK(hal_rt_commit_cycle(c) == HAL_OK);
+        for (int i = 0; i < 30; ++i) cycle(c);
+        CHECK(hal_rt_axis_read_status(c, 3, &axis) == HAL_OK && !axis.enabled);
+        hal_context_destroy(c);
+    }
+    omit_spindle_speed = 1;
+    c = create(&cfg);
+    CHECK(hal_context_start(c, NULL, 0) == HAL_ERROR_UNSUPPORTED);
+    hal_context_destroy(c);
+    omit_spindle_speed = 0;
+}
+
 int main(void) {
     lifecycle(); binding(); optional_capabilities(); motion_io(); wrap_and_faults();
     stop_overrides_staged_enable(); concurrent_stop();
@@ -1562,6 +1660,7 @@ int main(void) {
     speed_unit_pulses_per_second();
     orient_release_keeps_enable_intent(); orient_release_clears_vendor_control();
     stopped_orientation_does_not_resume(); axis_readiness();
+    spindle_prepare_csp();
     printf("context_regression: %u checks passed\n", checks);
     return 0;
 }

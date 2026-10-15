@@ -222,6 +222,29 @@ int32_t hal_rt_spindle_estop(HalContext* c, HalAxisId id);
  */
 int32_t hal_rt_spindle_request_mode(HalContext* c, HalAxisId id, HalSpindleMode mode);
 
+typedef enum {
+    HAL_CSP_PREPARE_NONE = 0,
+    HAL_CSP_PREPARE_STOPPING,
+    HAL_CSP_PREPARE_SWITCHING,
+    HAL_CSP_PREPARE_DONE,
+    HAL_CSP_PREPARE_ERROR,
+    HAL_CSP_PREPARE_CANCELLED
+} HalCSpindlePrepareState;
+
+/* 不定向准备 CSP：给零速度，由驱动减速，停稳后切 CSP 并使能；不设零、不处理 PLC 握手。
+ * 在 begin/commit 间调用一次，timeout_ms > 0 为总超时；HAL_OK 仅表示受理。
+ * 准备中运动、模式、定向、设零及重复准备请求返回 BUSY；持续运行周期并查询进展。
+ * 去使能/急停/复位取消准备，故障或超时撤销使能；调用方负责机床联锁与停车参数。
+ */
+int32_t hal_rt_spindle_prepare_csp(HalContext* c, HalAxisId id, uint32_t timeout_ms);
+
+/* 只读查询：先检查返回码，再看 state/result；仅 DONE 且 result=HAL_OK 表示准备完成。
+ * 进行中为 BUSY，取消为 STOPPED，失败为 TIMEOUT/NOT_RUNNING。
+ * DONE 不代表永久就绪，后续运动前仍须核对实际模式与使能。
+ */
+int32_t hal_rt_spindle_prepare_csp_state(HalContext* c, HalAxisId id,
+                                       int32_t* state, int32_t* result);
+
 /**
  * @brief 在 CSP 模式下下发相对既定零点的主轴单圈刻度（度）
  * 零点由 hal_rt_axis_set_pos(c, id, 0) 建立；命令侧基准在首次采样与使能那一拍被拉平到实际

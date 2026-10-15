@@ -37,6 +37,9 @@ typedef struct {
     double angle_command; /* 上次受理的普通刻度原值（保留方向符号） */
 
     int orient_state;   /* HAL_ORIENT_*：主轴定向进展；非 NONE 时暂停普通 DS402 推进 */
+    int prepare_state, prepare_result;
+    uint64_t prepare_deadline;
+    uint64_t prepare_stable_us;
     int orient_release_pending; /* commit 必须实际撤销 PDO 中的厂商控制字 */
     uint32_t orient_delay_left; /* 等待期内只记录低电平，不判完成 */
     uint8_t orient_done_low_seen; /* 本轮控制字提交后见过完成掩码全低 */
@@ -123,6 +126,54 @@ static Axis* find_axis(const HalContext* c, HalAxisId id) {
     for (int i = 0; i < c->axis_count; ++i)
         if (c->axes[i].cfg.logical_axis == (int32_t)id) return (Axis*)&c->axes[i];
     return NULL;
+}
+
+static int preparing_csp(const Axis* a) {
+    return a->prepare_state == HAL_CSP_PREPARE_STOPPING ||
+           a->prepare_state == HAL_CSP_PREPARE_SWITCHING;
+}
+
+static void cancel_motion(Axis* a);
+
+/* Runs after fresh feedback, before DS402 planning; never writes PDO itself. */
+static void advance_prepare_csp(HalContext* c, Axis* a) {
+    if (!preparing_csp(a)) return;
+    int failure = HAL_OK;
+    if ((a->status.raw_status & DS402_SW_BIT_FAULT) ||
+        (a->status.error_code_valid && a->status.error_code) ||
+        !a->status.speed_valid ||
+        (a->mode != DS402_MODE_CSV && a->mode != DS402_MODE_CSP))
+        failure = HAL_ERROR_NOT_RUNNING;
+    else if (c->cycle_seq >= a->prepare_deadline)
+        failure = HAL_ERROR_TIMEOUT;
+    if (failure) {
+        cancel_motion(a);
+        a->prepare_state = HAL_CSP_PREPARE_ERROR;
+        a->prepare_result = failure;
+        a->request = DS402_REQ_DISABLE;
+        a->stop_override = HAL_ESTOP_DISABLE_OPERATION;
+        a->stop_cycle = c->cycle_seq;
+        a->desired_mode = a->mode == DS402_MODE_CSV ? DS402_MODE_CSV : DS402_MODE_CSP;
+        return;
+    }
+    a->zero_speed = 1;
+    const int stopped = fabs(a->status.actual_speed_rpm) <= 1.0;
+    const int switching = a->prepare_state == HAL_CSP_PREPARE_SWITCHING;
+    const double position_tolerance = fmax(fabs(a->cfg.command_units_per_count),
+                                           fabs(a->cfg.feedback_units_per_count));
+    if (stopped && (!switching || (a->mode == DS402_MODE_CSP && a->status.enabled &&
+        fabs(a->status.command_pos - a->status.actual_pos) <= position_tolerance)))
+        a->prepare_stable_us += c->config.cycle_us;
+    else a->prepare_stable_us = 0;
+    if (a->prepare_stable_us < 10000u) return;
+    a->prepare_stable_us = 0;
+    if (!switching) {
+        a->desired_mode = DS402_MODE_CSP;
+        a->prepare_state = HAL_CSP_PREPARE_SWITCHING;
+    } else {
+        a->prepare_state = HAL_CSP_PREPARE_DONE;
+        a->prepare_result = HAL_OK;
+    }
 }
 
 /* 32 位原始计数按二进制补码解释成有符号值。 */
@@ -607,6 +658,7 @@ int32_t hal_rt_begin_cycle(HalContext* c) {
     for (int i = 0; i < axis_count; ++i) {
         Axis* a = &c->axes[i];
         if (sample_axis(a)) return bus_error(c);
+        advance_prepare_csp(c, a);
         /* 故障复位的收尾判断。必须在算 planned[] 之前——结论会改 a->request，
          * 而 request 正是这一拍状态机的输入。 */
         if (a->reset_state == HAL_RESET_PENDING) {
@@ -773,6 +825,10 @@ int32_t hal_rt_commit_cycle(HalContext* c) {
 
 /* 取消尚未提交的运动：丢脏标志、清速度目标、撤销 motion_ready。只动 HAL 侧暂存。 */
 static void cancel_motion(Axis* a) {
+    if (preparing_csp(a) || a->prepare_state == HAL_CSP_PREPARE_DONE) {
+        a->prepare_state = HAL_CSP_PREPARE_CANCELLED;
+        a->prepare_result = HAL_ERROR_STOPPED;
+    }
     if (a->orient_state != HAL_ORIENT_NONE) a->orient_release_pending = 1;
     a->orient_state = HAL_ORIENT_NONE;
     a->orient_delay_left = 0;
@@ -854,6 +910,7 @@ int32_t hal_rt_axis_write_pos(HalContext* c, HalAxisId id, double pos) {
     int rc = gate(c); if (rc) return rc;
     Axis* a = find_axis(c, id);
     if (!a || !isfinite(pos)) return HAL_ERROR_ARGUMENT;
+    if (preparing_csp(a)) return HAL_ERROR_BUSY;
     /* 受理条件整体不变，只把"没使能"与"模式不符"分出来，不拆成多段早期返回。 */
     if (c->phase != 2) return HAL_ERROR_NOT_RUNNING;   /* 调用时机，不是使能问题 */
     if (!a->motion_ready || !a->status.enabled) return HAL_ERROR_NOT_ENABLED;
@@ -899,6 +956,7 @@ int32_t hal_rt_axis_set_pos(HalContext* c, HalAxisId id, double pos) {
     int rc = gate(c); if (rc) return rc;
     Axis* a = find_axis(c, id);
     if (!a || !isfinite(pos)) return HAL_ERROR_ARGUMENT;
+    if (preparing_csp(a)) return HAL_ERROR_BUSY;
     if (!c->sampled) return HAL_ERROR_NOT_RUNNING;
     const double delta = pos - a->status.actual_pos;
     if (!isfinite(delta) || !isfinite(a->feedback_offset + delta) ||
@@ -932,12 +990,64 @@ int32_t hal_rt_spindle_estop(HalContext* c, HalAxisId id) {
     return hal_rt_axis_estop(c, id);
 }
 
-/* 只改期望模式，不动使能（切模式不会使能轴）。
- * 期望模式真的变了才取消运动，重复调用不会反复丢指令。 */
+/* Explicit ownership transfer; no vendor orientation and no coordinate rebasing. */
+int32_t hal_rt_spindle_prepare_csp(HalContext* c, HalAxisId id, uint32_t timeout_ms) {
+    const int rc = spindle_gate(c, id); if (rc) return rc;
+    Axis* a = find_axis(c, id);
+    if (!timeout_ms) return HAL_ERROR_ARGUMENT;
+    if (c->phase != 2 || !a->sampled) return HAL_ERROR_NOT_RUNNING;
+    if (preparing_csp(a)) return HAL_ERROR_BUSY;
+    if (!a->has_speed) return HAL_ERROR_UNSUPPORTED;
+    if (a->reset_state == HAL_RESET_PENDING || a->orient_state != HAL_ORIENT_NONE ||
+        a->orient_release_pending || a->desired_mode != a->mode)
+        return HAL_ERROR_BUSY;
+    if ((a->stop_override && a->stop_cycle == c->cycle_seq) ||
+        (a->status.raw_status & DS402_SW_BIT_FAULT) ||
+        (a->status.error_code_valid && a->status.error_code) ||
+        (a->mode != DS402_MODE_CSV && a->mode != DS402_MODE_CSP))
+        return HAL_ERROR_NOT_RUNNING;
+    if (a->mode == DS402_MODE_CSP &&
+        (fabs(a->status.actual_speed_rpm) > 1.0 ||
+         (a->status.enabled &&
+          fabs(a->status.command_pos - a->status.actual_pos) > fabs(command_scale(a)))))
+        return HAL_ERROR_BUSY;
+    /* If already enabled in CSP, replace the old hold target before taking ownership.
+     * Disabled/switching drives get the standard DS402 actual-position preset. */
+    if (a->mode == DS402_MODE_CSP && a->status.enabled) {
+        const int hold_rc = hal_rt_axis_write_pos(c, id, a->status.actual_pos);
+        if (hold_rc) return hold_rc;
+    }
+    a->speed_dirty = 0;
+    if (a->mode != DS402_MODE_CSP) a->pos_dirty = 0;
+    a->angle_valid = 0;
+    a->zero_speed = 1;
+    a->speed.command_speed = 0;
+    a->request = DS402_REQ_ENABLE;
+    a->prepare_stable_us = 0;
+    const uint64_t us = (uint64_t)timeout_ms * 1000u;
+    a->prepare_deadline = c->cycle_seq +
+        (us + c->config.cycle_us - 1u) / c->config.cycle_us;
+    a->prepare_result = HAL_ERROR_BUSY;
+    a->prepare_state = HAL_CSP_PREPARE_STOPPING;
+    return HAL_OK;
+}
+
+int32_t hal_rt_spindle_prepare_csp_state(HalContext* c, HalAxisId id,
+                                       int32_t* state, int32_t* result) {
+    const int rc = spindle_gate(c, id); if (rc) return rc;
+    if (!state || !result) return HAL_ERROR_ARGUMENT;
+    const Axis* a = find_axis(c, id);
+    *state = a->prepare_state;
+    *result = a->prepare_result;
+    return HAL_OK;
+}
+
+/* Only changes desired mode, not enable intent. */
 int32_t hal_rt_spindle_request_mode(HalContext* c, HalAxisId id, HalSpindleMode mode) {
     const int rc = spindle_gate(c, id); if (rc) return rc;
     if (mode != HAL_SPINDLE_CSV && mode != HAL_SPINDLE_CSP) return HAL_ERROR_ARGUMENT;
     Axis* a = find_axis(c, id);
+    if (preparing_csp(a)) return HAL_ERROR_BUSY;
     const int desired = mode == HAL_SPINDLE_CSP ? DS402_MODE_CSP : DS402_MODE_CSV;
     if (a->desired_mode != desired) cancel_motion(a);
     a->desired_mode = desired;
@@ -949,6 +1059,7 @@ int32_t hal_rt_spindle_request_mode(HalContext* c, HalAxisId id, HalSpindleMode 
 int32_t hal_rt_spindle_write_speed(HalContext* c, HalAxisId id, double rpm, int32_t dir) {
     int rc = spindle_gate(c, id); if (rc) return rc;
     Axis* a = find_axis(c, id);
+    if (preparing_csp(a)) return HAL_ERROR_BUSY;
     if (!isfinite(rpm) || rpm < 0 || rpm > a->spindle_cfg.max_speed || dir < -1 || dir > 1) return HAL_ERROR_ARGUMENT;
     /* 同上：受理条件不变，只细分错误码。 */
     if (c->phase != 2) return HAL_ERROR_NOT_RUNNING;
@@ -996,6 +1107,7 @@ int32_t hal_rt_axis_readiness(HalContext* c, HalAxisId id, uint32_t* out) {
 int32_t hal_rt_spindle_request_orient(HalContext* c, HalAxisId id) {
     const int rc = spindle_gate(c, id); if (rc) return rc;
     Axis* a = find_axis(c, id);
+    if (preparing_csp(a)) return HAL_ERROR_BUSY;
     if (!a->cfg.vendor_orient_control_word || !a->cfg.vendor_orient_done_mask)
         return HAL_ERROR_UNSUPPORTED;       /* 没配定向，不静默当成功 */
     if (c->phase != 2) return HAL_ERROR_NOT_RUNNING;
