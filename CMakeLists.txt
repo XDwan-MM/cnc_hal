@@ -11,21 +11,21 @@ include(GNUInstallDirs)
 set(HAL_INSTALLED_DEVICES_JSON "${CMAKE_INSTALL_FULL_DATADIR}/cnc_hal/devices.json")
 
 set(HAL_SOURCES
-    src/internal/hal_config.c
-    src/internal/hal_context.c
-    src/common/devdict.c
-    src/Greemaster/main_demo.c
-    src/Greemaster/device.c
-    src/Greemaster/device_table.c
-    src/Greemaster/entry_access.c
-    src/Greemaster/servo_step.c
-    src/Greemaster/slave_list.c)
+    src/core/hal_config.c
+    src/core/hal_context.c
+    src/backend/greemaster/devdict.c
+    src/backend/greemaster/master.c
+    src/backend/greemaster/device.c
+    src/backend/greemaster/device_table.c
+    src/backend/greemaster/entry_access.c
+    src/backend/greemaster/servo_step.c
+    src/backend/greemaster/slave_list.c)
 
 add_library(cnc_hal SHARED ${HAL_SOURCES})
 target_include_directories(cnc_hal PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
-    PRIVATE src src/Greemaster)
+    PRIVATE src src/backend/greemaster)
 target_compile_options(cnc_hal PRIVATE -Wall -Wextra -Werror)
 target_compile_definitions(cnc_hal PRIVATE "DEVICES_JSON_PATH=\"${HAL_INSTALLED_DEVICES_JSON}\"")
 target_link_libraries(cnc_hal PRIVATE ${GREEMASTER_LIBRARY} ${XML2_LIBRARY} Threads::Threads m)
@@ -41,7 +41,7 @@ if(HAL_BUILD_STATIC)
     target_include_directories(cnc_hal_static PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
-        PRIVATE src src/Greemaster)
+        PRIVATE src src/backend/greemaster)
     target_compile_options(cnc_hal_static PRIVATE -Wall -Wextra -Werror)
     target_compile_definitions(cnc_hal_static PRIVATE "DEVICES_JSON_PATH=\"${HAL_INSTALLED_DEVICES_JSON}\"")
     # 静态归档保留 SDK 等外部符号，由最终使用者链接这些依赖。
@@ -54,7 +54,7 @@ if(HAL_BUILD_STATIC)
     install(TARGETS cnc_hal_static ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
 endif()
 install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR} FILES_MATCHING PATTERN "*.h")
-install(FILES src/Greemaster/devices.json DESTINATION ${CMAKE_INSTALL_DATADIR}/cnc_hal)
+install(FILES config/devices.json DESTINATION ${CMAKE_INSTALL_DATADIR}/cnc_hal)
 
 include(CTest)
 option(HAL_BUILD_HARDWARE_TEST "Build the manually run hardware test program" OFF)

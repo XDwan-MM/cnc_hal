@@ -1,6 +1,6 @@
 /* DS402 推进规则的离线穷举验证。
  * 纯函数，不需要任何硬件——这是它被抽出来的原因。 */
-#include "common/Ds402.h"
+#include "backend/greemaster/ds402.h"
 #include <stdio.h>
 
 static int fails = 0;

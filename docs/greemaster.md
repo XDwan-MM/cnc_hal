@@ -13,7 +13,7 @@ HAL 内部的主站驱动层。源码原本是封装侧的独立包（`DEMO_LIB_
 
 | 文件 | 干什么 | 相对原代码 |
 |---|---|---|
-| `main_demo.c/.h` | 启动序列、握手、字典加载；`StopFlag` / `RequestStop` | 原有，去线程/去信号，加握手与建表 |
+| `master.c/.h` | 启动序列、握手、字典加载；`StopFlag` / `RequestStop` | 原有，去线程/去信号，加握手与建表 |
 | `device.c/.h` | 读 EEPROM 定身份、查字典定类型、按类型装配 Entry 句柄 | 原有，类型识别改查字典、`servo_addr_config` 重写 |
 | `slave_list.c/.h` | PDO 映射链表（SM / PDO / Entry 三级） | 分配失败返回错误，支持局部链清理 |
 | `device_table.c/.h` | **按槽设备表** —— 本层对 HAL 的取数口 | 新增 |
@@ -23,22 +23,17 @@ HAL 内部的主站驱动层。源码原本是封装侧的独立包（`DEMO_LIB_
 | ~~`cJSON.c/h`~~ | **已删** —— 3302 行死代码，没有任何 `.c` 调它 | 删除 |
 | ~~`master_hal.h`~~ | **已删** —— 它描述的 `Master_Start`/`Master_Get_Device_Info`/`Master_Close` 三个函数在源码里根本不存在 | 删除 |
 
-### 依赖方向：本层只依赖 `src/common/`
+### 依赖方向
 
+```text
+src/core/ -> src/backend/greemaster/ -> GreeMaster SDK
+                         |
+                         +-- ds402.h：纯状态推进规则
+                         +-- devdict.c/.h：设备字典解析
+config/devices.json：运行时设备字典
 ```
-              src/common/            ← 契约：纯定义 + 纯函数，无 IO，谁都不依赖
-              ├── Ds402.h            DS402 编码 + 推进规则（纯函数，可离线穷举测试）
-              └── devdict.c/.h       设备字典读取器（自包含 C99，无 cJSON）
-                    ↑                          ↑
-            src/Greemaster/            src/internal/ + src/Dio/
-            （本层）                    （HAL 内核）
-```
 
-**本层不 include HAL 内核的任何东西**——两边都只指向 `common/`，谁都不指向谁。
-
-这样这一层可以**单独交付**：把 `Greemaster/` + `common/` 打成一个包，谁都能用，
-不需要 HAL 存在。（`Ds402.h` 和 `devdict` 本来一度放在 HAL 内核那边，是搬过来的——
-那样会让驱动层反过来依赖 HAL，方向错了。）
+后端不依赖 HAL 内核。DS402 与字典解析仍可独立测试，本次仅合并目录，不改变函数职责。
 
 ---
 
@@ -160,7 +155,7 @@ CMake 会把 `devices.json` 安装到 `${CMAKE_INSTALL_DATADIR}/cnc_hal/devices.
 HAL 返回 `HAL_ERROR_CONFIG`；日志同时打印路径和解析原因。开发树内运行可用：
 
 ```bash
-export CNC_HAL_DEVICES_JSON="$(pwd)/src/Greemaster/devices.json"
+export CNC_HAL_DEVICES_JSON="$(pwd)/config/devices.json"
 ```
 
 字典要求 version=1；拒绝非法数值、重复匹配键、未知字段与尾随垃圾。
@@ -235,7 +230,7 @@ void Master_RequestStop(void);                // 原子停止通知，不释放�
 
 ### 关于 `Master_ServoStep`
 
-读状态字 → 按 `Ds402_NextStepReq()`（纯函数，在 `src/common/Ds402.h`）算这一拍该做什么
+读状态字 → 按 `Ds402_NextStepReq()`（纯函数，在 `src/backend/greemaster/ds402.h`）算这一拍该做什么
 → 写控制字 / 运行模式 / 目标位置。**不含任何策略**——往哪推由 `req` 传进来。
 
 **请求是每拍传的，本层不持有。** 「要不要使能」是上层策略，不是硬件事实；HAL 那边

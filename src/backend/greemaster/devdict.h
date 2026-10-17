@@ -4,7 +4,7 @@
  * @brief 设备字典 JSON 读取器（自包含单文件，无 cJSON 依赖）
  *
  * 按 EEPROM 读到的 厂商号/产品号/版本号 查字典，得到设备类型 / 名称 / 对象映射。
- * 格式 v1（完整样例见 `Greemaster/devices.json`）：顶层 { "version": 1, "devices": [...] }。
+ * 格式 v1（完整样例见 `config/devices.json`）：顶层 { "version": 1, "devices": [...] }。
  * - revision 为数字或 "*"（通配）；缺省视为 "*"
  * - type 为 servo / gree6 / gree4 / panel / io / io_expansion
  * - profile 三选一："ds402" 用内置标准对象号（不得写 objects）；"custom" 用本条的

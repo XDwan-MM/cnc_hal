@@ -1,8 +1,8 @@
 #include "hal_c_api.h"
-#include "Greemaster/main_demo.h"
-#include "Greemaster/device_table.h"
-#include "Greemaster/servo_step.h"
-#include "Greemaster/entry_access.h"
+#include "backend/greemaster/master.h"
+#include "backend/greemaster/device_table.h"
+#include "backend/greemaster/servo_step.h"
+#include "backend/greemaster/entry_access.h"
 #include <assert.h>
 #include <math.h>
 #include <pthread.h>
@@ -16,13 +16,13 @@ static int fail_init, fail_read, fail_write, fail_step, fail_wait, fail_send, fa
 static int wrong_type, bad_width;
 static int wide_mode_bits;    /* 非零 = 模式字按 16 位建句柄（模拟蓝海华腾那类 ESI） */
 static int narrow_pos_bits;   /* 非零 = 位置 PDO 只给 16 位（应被拒） */
-static int omit_optional, omit_spindle_speed;
+static int omit_optional, omit_spindle_speed, omit_spindle_position, omit_feed_position;
 static int stuck_fault;      /* 非零 = 连复位边沿也清不掉故障，用来测超时 */
 static int force_serial_zero; /* 非零 = 桩上报 serial=0，用来测 device_id 的哈希回退 */
 static uint32_t previous_control[2];
 static unsigned reset_edges[2];
 static int ignore_first_reset_edge;
-/* 驱动层的停止标志，**独立于 HAL 那份**——真实驱动层有自己的一个（main_demo.c:17），
+/* 驱动层的停止标志，**独立于 HAL 那份**——真实驱动层有自己的一个（master.c:17），
  * Master_RequestStop() 置它、Master_WaitCycle() 前后查它。这里照抄这个结构，
  * 才能验出"HAL 的 request_stop 有没有透传到驱动层"。 */
 static int driver_stop;
@@ -54,10 +54,13 @@ int ethercat_init(const MasterConfig* cfg) {
         slots[i].serial = force_serial_zero ? 0 : 99;
         strcpy(slots[i].name, "Dual axis");
         slots[i].entries.slave.statusWord.bit_length = 16;
-        slots[i].entries.slave.act_pos.bit_length = narrow_pos_bits ? 16 : 32;
+        slots[i].entries.slave.act_pos.bit_length =
+            (i == 0 && omit_spindle_position) || (i == 1 && omit_feed_position) ? 0 :
+            narrow_pos_bits ? 16 : 32;
         slots[i].entries.slave.act_mode.bit_length = wide_mode_bits ? 16 : 8;
         slots[i].entries.slave.Control_word.bit_length = 16;
-        slots[i].entries.slave.target_pos.bit_length = 32;
+        slots[i].entries.slave.target_pos.bit_length =
+            (i == 0 && omit_spindle_position) || (i == 1 && omit_feed_position) ? 0 : 32;
         slots[i].entries.slave.Modes_of_operation.bit_length = wide_mode_bits ? 16 : 8;
         slots[i].entries.slave.act_speed.bit_length = 32;
         slots[i].entries.slave.target_speed.bit_length = 32;
@@ -137,6 +140,7 @@ int Master_CommitCycle(void) {
 }
 int Master_ServoRead(int slot, DevDictRole role, uint32_t* out) {
     ++reads;
+    if (role == DEV_DICT_ROLE_ACTUAL_POS && !slots[slot].entries.slave.act_pos.bit_length) return -1;
     if (role == DEV_DICT_ROLE_ERROR_CODE && !slots[slot].entries.slave.error_code.bit_length) return -1;
     if (role == DEV_DICT_ROLE_ACTUAL_SPEED && !slots[slot].entries.slave.act_speed.bit_length) return -1;
     if (fail_read) return -1;
@@ -144,6 +148,7 @@ int Master_ServoRead(int slot, DevDictRole role, uint32_t* out) {
 }
 int Master_ServoWrite(int slot, DevDictRole role, uint32_t value) {
     ++writes;
+    if (role == DEV_DICT_ROLE_TARGET_POS && !slots[slot].entries.slave.target_pos.bit_length) return -1;
     if (role == DEV_DICT_ROLE_TARGET_SPEED && !slots[slot].entries.slave.target_speed.bit_length) return -1;
     if (fail_write) return -1;
     servo[slot][role] = value; return 0;
@@ -154,7 +159,9 @@ int Master_ServoStep(int slot, Ds402Request req, uint16_t mode, uint16_t* out) {
     const uint16_t sw = servo[slot][DEV_DICT_ROLE_STATUS_WORD];
     if (out) *out = sw;
     Ds402Step s = Ds402_NextStepReq(sw, servo[slot][DEV_DICT_ROLE_MODE_DISPLAY], req, mode, DS402_MODESW_DISABLE_FIRST);
-    if (s.preset_target && Master_ServoWrite(slot, DEV_DICT_ROLE_TARGET_POS, servo[slot][DEV_DICT_ROLE_ACTUAL_POS])) return -1;
+    if (s.preset_target && slots[slot].entries.slave.act_pos.bit_length == 32 &&
+        slots[slot].entries.slave.target_pos.bit_length == 32 &&
+        Master_ServoWrite(slot, DEV_DICT_ROLE_TARGET_POS, servo[slot][DEV_DICT_ROLE_ACTUAL_POS])) return -1;
     if (s.op_mode != 0xFFFF && Master_ServoWrite(slot, DEV_DICT_ROLE_OP_MODE, s.op_mode)) return -1;
     if (Ds402_StepWritesControl(s))
         return Master_ServoWrite(slot, DEV_DICT_ROLE_CONTROL_WORD, s.control_word);
@@ -331,6 +338,40 @@ static void optional_capabilities(void) {
     CHECK(strstr(error, "从站 0 轴 0") && strstr(error, "主轴速度"));
     hal_context_destroy(c);
     omit_spindle_speed = 0;
+}
+
+static void velocity_only_spindle(void) {
+    HalCConfig cfg = config();
+    omit_spindle_position = 1;
+    HalContext* c = create(&cfg);
+    CHECK(hal_context_start(c, NULL, 0) == 0);
+    HalCCapability cap;
+    CHECK(hal_axis_capability(c, 3, HAL_FUNC_POSITION, &cap) == 0 &&
+          cap.state == HAL_CAP_UNSUPPORTED);
+    CHECK(hal_axis_capability(c, 3, HAL_FUNC_SPEED, &cap) == 0 && cap.state == HAL_CAP_READY);
+    enable(c);
+    begin(c);
+    HalCAxisStatus status;
+    CHECK(hal_rt_axis_read_status(c, 3, &status) == 0 && !status.position_valid &&
+          status.enabled && status.speed_valid);
+    CHECK(hal_rt_spindle_write_speed(c, 3, 100, 1) == 0);
+    CHECK(hal_rt_spindle_request_mode(c, 3, HAL_SPINDLE_CSP) == HAL_ERROR_UNSUPPORTED);
+    CHECK(hal_rt_spindle_prepare_csp(c, 3, 1000) == HAL_ERROR_UNSUPPORTED);
+    CHECK(hal_rt_spindle_write_pos(c, 3, 90) == HAL_ERROR_UNSUPPORTED);
+    CHECK(hal_rt_axis_write_pos(c, 3, 90) == HAL_ERROR_UNSUPPORTED);
+    CHECK(hal_rt_axis_set_pos(c, 3, 0) == HAL_ERROR_UNSUPPORTED);
+    double position;
+    CHECK(hal_rt_axis_read_pos(c, 3, &position) == HAL_ERROR_UNSUPPORTED);
+    CHECK(hal_rt_commit_cycle(c) == 0);
+    CHECK(servo[0][DEV_DICT_ROLE_TARGET_SPEED] == 100);
+    hal_context_destroy(c);
+    omit_spindle_position = 0;
+
+    omit_feed_position = 1;
+    c = create(&cfg);
+    CHECK(hal_context_start(c, NULL, 0) == HAL_ERROR_UNSUPPORTED);
+    hal_context_destroy(c);
+    omit_feed_position = 0;
 }
 
 static void motion_io(void) {
@@ -1650,7 +1691,7 @@ static void spindle_prepare_csp(void) {
 }
 
 int main(void) {
-    lifecycle(); binding(); optional_capabilities(); motion_io(); wrap_and_faults();
+    lifecycle(); binding(); optional_capabilities(); velocity_only_spindle(); motion_io(); wrap_and_faults();
     stop_overrides_staged_enable(); concurrent_stop();
     preset_overflow_probe(); spindle_origin_angle(); angle_regressions();
     pdo_width_policy();

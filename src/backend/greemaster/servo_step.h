@@ -2,7 +2,7 @@
 
 #include <stdint.h>
 #include "export.h"
-#include "common/Ds402.h"   /* Ds402Request / Ds402ModeSwitch */
+#include "backend/greemaster/ds402.h"   /* Ds402Request / Ds402ModeSwitch */
 
 #ifdef __cplusplus
 extern "C" {

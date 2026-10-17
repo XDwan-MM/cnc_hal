@@ -52,16 +52,19 @@ MASTER_API int Master_ServoStep(int slot, Ds402Request req,
 
     const Ds402Step step = Ds402_NextStepReq(sw, cur_mode, req, desired_op_mode, g_msw[slot]);
     const int write_control = Ds402_StepWritesControl(step);
+    const int has_position = axis->act_pos.bit_length == 32 && axis->target_pos.bit_length == 32;
+    const int preset_target = step.preset_target &&
+        (desired_op_mode == DS402_MODE_CSP || has_position);
     if ((write_control && (axis->Control_word.bit_length < 16 ||
                            axis->Control_word.bit_length > 32)) ||
         (step.op_mode != 0xFFFFu && (axis->Modes_of_operation.bit_length < 8 ||
                                      axis->Modes_of_operation.bit_length > 32)) ||
-        (step.preset_target &&
+        (preset_target &&
          (axis->act_pos.bit_length != 32 || axis->target_pos.bit_length != 32)))
         return -1;
 
     /* 预置成功后才改模式；任一失败都不继续写后续控制量。 */
-    if (step.preset_target) {
+    if (preset_target) {
         uint32_t actual = 0;
         if (GM_TxPdoEntry_Read(axis->act_pos, &actual, sizeof(actual)) != 0 ||
             GM_RxPdoEntry_Write(axis->target_pos, actual) != 0) return -1;

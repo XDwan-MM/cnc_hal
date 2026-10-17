@@ -47,20 +47,33 @@ if rt_patch:
     subprocess.run(command, check=True)
 package = destination / "lib/cnc_hal"
 # Replace only the copied candidate package; the original RT tree is never written.
-for directory in ["include", "internal/Greemaster", "internal/common", "lib"]:
+for directory in ["include", "internal", "lib"]:
     target = package / directory
     if target.exists():
         shutil.rmtree(target)
     target.mkdir(parents=True)
+(package / "internal/backend/greemaster").mkdir(parents=True)
 for source_directory, target_directory in [
     (HAL / "include", package / "include"),
-    (HAL / "src/Greemaster", package / "internal/Greemaster"),
-    (HAL / "src/common", package / "internal/common"),
+    (HAL / "src/backend/greemaster", package / "internal/backend/greemaster"),
 ]:
     for source in source_directory.glob("*.h"):
         shutil.copy2(source, target_directory / source.name)
 shutil.copy2(library, package / "lib/libcnc_hal.a")
-shutil.copy2(HAL / "src/Greemaster/devices.json", package / "devices.json")
+shutil.copy2(HAL / "config/devices.json", package / "lib/devices.json")
+
+# Migrate includes only in the copied simulator; leave the source RT untouched.
+simulator = destination / "src/hal/rt_hal_sim_backend.c"
+if simulator.is_file():
+    source = simulator.read_text()
+    for old, new in [
+        ('"Greemaster/', '"backend/greemaster/'),
+        ('"common/', '"backend/greemaster/'),
+        ("main_demo.h", "master.h"),
+        ("Ds402.h", "ds402.h"),
+    ]:
+        source = source.replace(old, new)
+    simulator.write_text(source)
 
 
 def git(root, *arguments):
@@ -78,14 +91,14 @@ manifest = {
     "hal_source_sha256": hashes(HAL, [
         *HAL.glob("include/*.h"), *HAL.glob("src/**/*.h"),
         *HAL.glob("src/**/*.c"), *HAL.glob("src/**/*.cpp"),
-        HAL / "src/Greemaster/devices.json", HAL / "CMakeLists.txt", HAL / "build_all.sh",
+        HAL / "config/devices.json", HAL / "CMakeLists.txt", HAL / "build_all.sh",
     ]),
     "rt_root": str(rt), "rt_head": git(rt, "rev-parse", "HEAD"),
     "rt_tracked_diff_sha256": hashlib.sha256(
         git(rt, "diff", "HEAD", "--binary").encode()).hexdigest(),
     "hal_package_sha256": hashes(package, [
         *package.glob("include/*.h"), *package.glob("internal/**/*.h"),
-        package / "lib/libcnc_hal.a", package / "devices.json",
+        package / "lib/libcnc_hal.a", package / "lib/devices.json",
     ]),
     "rt_source_sha256": hashes(destination, [
         *destination.glob("src/**/*.c"), *destination.glob("src/**/*.cpp"),

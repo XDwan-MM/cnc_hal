@@ -1,5 +1,5 @@
 #include "device_table.h"
-#include "common/devdict.h"
+#include "backend/greemaster/devdict.h"
 #include <string.h>
 
 static DeviceSlot g_slots[MAX_DEVICE_NUM];

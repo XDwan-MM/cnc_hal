@@ -422,18 +422,17 @@ static int entryHasRole(const DevDictEntry* entry, DevDictRole role) {
     return 0;
 }
 
-/* custom 伺服必须带齐 GmServoLink 使能、位置、速度所需的九个对象。 */
+/* 位置和扭矩对象可缺省；具体轴所需能力由 HAL 绑定时校验。 */
 static int validateCustomServo(const DevDictEntry* entry, int entryIndex,
                                char* err, int errLen) {
     static const DevDictRole required[] = {
         DEV_DICT_ROLE_STATUS_WORD, DEV_DICT_ROLE_CONTROL_WORD,
-        DEV_DICT_ROLE_TARGET_POS, DEV_DICT_ROLE_ACTUAL_POS,
         DEV_DICT_ROLE_TARGET_SPEED, DEV_DICT_ROLE_ACTUAL_SPEED,
         DEV_DICT_ROLE_ERROR_CODE, DEV_DICT_ROLE_OP_MODE, DEV_DICT_ROLE_MODE_DISPLAY,
     };
     static const char* const names[] = {
-        "status_word", "control_word", "target_pos", "actual_pos",
-        "target_speed", "actual_speed", "error_code", "op_mode", "mode_display",
+        "status_word", "control_word", "target_speed", "actual_speed",
+        "error_code", "op_mode", "mode_display",
     };
     size_t i;
     if (strcmp(entry->type, "servo") != 0) return 1;

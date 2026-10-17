@@ -1,6 +1,6 @@
-#include "main_demo.h"
+#include "master.h"
 #include "device.h"
-#include "common/devdict.h"
+#include "backend/greemaster/devdict.h"
 #include "device_table.h"
 #include "servo_step.h"
 #include <stdatomic.h>

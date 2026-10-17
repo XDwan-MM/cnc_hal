@@ -2,11 +2,11 @@
  * begin 采样+计划，begin 与 commit 之间业务改请求，commit 是唯一发送出口。 */
 
 #include "hal_c_api.h"
-#include "Greemaster/main_demo.h"
-#include "Greemaster/device_table.h"
-#include "Greemaster/device.h"
-#include "Greemaster/servo_step.h"
-#include "Greemaster/entry_access.h"
+#include "backend/greemaster/master.h"
+#include "backend/greemaster/device_table.h"
+#include "backend/greemaster/device.h"
+#include "backend/greemaster/servo_step.h"
+#include "backend/greemaster/entry_access.h"
 #include <math.h>
 #include <stdatomic.h>
 #include <time.h>
@@ -22,6 +22,7 @@ typedef struct {
     int sampled;       /* 本 context 内是否采过样：决定 counts 取初值还是取增量 */
     int mode;          /* 驱动器回报的当前模式（0x6061）；-1 = 还没采到 */
     int desired_mode;  /* HAL 要求驱动器处在的模式（CSP/CSV），每拍传给状态机 */
+    int has_position;  /* 实际位置和目标位置 PDO 都是 32 位 */
     int has_speed;     /* 0x606C 和 0x60FF 同时绑定 */
     int has_error;     /* 0x603F 已绑定 */
 
@@ -153,7 +154,7 @@ static void advance_prepare_csp(HalContext* c, Axis* a) {
         a->request = DS402_REQ_DISABLE;
         a->stop_override = HAL_ESTOP_DISABLE_OPERATION;
         a->stop_cycle = c->cycle_seq;
-        a->desired_mode = a->mode == DS402_MODE_CSV ? DS402_MODE_CSV : DS402_MODE_CSP;
+        a->desired_mode = !a->has_position || a->mode == DS402_MODE_CSV ? DS402_MODE_CSV : DS402_MODE_CSP;
         return;
     }
     a->zero_speed = 1;
@@ -221,19 +222,19 @@ static int bind_axis(Axis* a, const DeviceSlot* slots, int count) {
         if (s->slave_pos != a->cfg.slave_pos || s->axis_index != a->cfg.axis_index) continue;
         if (s->type != SERVO_TYPE && s->type != GREE_AXIS6_TYPE && s->type != GREE_AXIS4_TYPE) continue;
         a->slot = i;
-        /* 必需 PDO 的位长：位置类 0x6064 / 0x607A 必须正好 32 位（读走 signed32() 补码，
-         * 写要放完整 int32 计数）；状态字/控制字允许 16..32，模式字允许 8..32。 */
+        /* 状态字/控制字允许 16..32，模式字允许 8..32。 */
         const slave_addr* h = &s->entries.slave;
-        if (h->act_pos.bit_length != 32 || h->target_pos.bit_length != 32 ||
-            h->statusWord.bit_length < 16 || h->statusWord.bit_length > 32 ||
+        if (h->statusWord.bit_length < 16 || h->statusWord.bit_length > 32 ||
             h->Control_word.bit_length < 16 || h->Control_word.bit_length > 32 ||
             h->act_mode.bit_length < 8 || h->act_mode.bit_length > 32 ||
             h->Modes_of_operation.bit_length < 8 || h->Modes_of_operation.bit_length > 32)
             return HAL_ERROR_UNSUPPORTED;
+        a->has_position = h->act_pos.bit_length == 32 && h->target_pos.bit_length == 32;
         /* 速度与错误码是可选能力：不合规只记为没有该能力（has_* = 0）；主轴缺速度 PDO 直接拒绝。 */
         a->has_speed = h->act_speed.bit_length == 32 && h->target_speed.bit_length == 32;
         a->has_error = h->error_code.bit_length == 16;
-        /* 主轴不允许没有速度模式*/
+        if ((!a->spindle || a->desired_mode == DS402_MODE_CSP) && !a->has_position)
+            return HAL_ERROR_UNSUPPORTED;
         if (a->spindle && !a->has_speed) return HAL_ERROR_UNSUPPORTED;
         /* 填充身份信息 */
         a->identity.type = s->type;
@@ -410,7 +411,8 @@ int32_t hal_context_start(HalContext* c, char* err, uint32_t len) {
                 snprintf(bind_detail, sizeof(bind_detail),
                          "从站 %d 轴 %d 缺少%s必需 PDO 功能",
                          a->cfg.slave_pos, a->cfg.axis_index,
-                         a->spindle && !a->has_speed ? "主轴速度" : "DS402 控制");
+                         a->spindle && !a->has_speed ? "主轴速度" :
+                         !a->has_position ? "位置" : "DS402 控制");
                 detail = bind_detail;
             }
             goto bad;
@@ -513,7 +515,10 @@ int32_t hal_axis_capability(const HalContext* c, HalAxisId id, uint32_t function
     out->slave_pos = a->cfg.slave_pos;
     out->axis_index = a->cfg.axis_index;
     out->state = HAL_CAP_READY;
-    if (function == HAL_FUNC_SPEED && !a->has_speed) {
+    if (function == HAL_FUNC_POSITION && !a->has_position) {
+        out->state = HAL_CAP_UNSUPPORTED;
+        snprintf(out->reason, sizeof(out->reason), "缺少实际位置或目标位置 PDO");
+    } else if (function == HAL_FUNC_SPEED && !a->has_speed) {
         out->state = HAL_CAP_UNSUPPORTED;
         snprintf(out->reason, sizeof(out->reason), "缺少实际速度或目标速度 PDO");
     } else if (function == HAL_FUNC_ERROR_CODE && !a->has_error) {
@@ -595,31 +600,33 @@ int32_t hal_rt_wait_cycle(HalContext* c) {
  * 线性反馈按 32 位回绕累计，模反馈按每转脉冲数取最短差值；两者都要求相邻采样位移
  * 小于半个计数周期。任一读失败即总线故障。 */
 static int sample_axis(Axis* a) {
-    uint32_t raw, sw, mode, error = 0, velocity = 0;
+    uint32_t raw = 0, sw, mode, error = 0, velocity = 0;
     // 尝试读取五个角色的 PDO，若有任何一个失败则返回总线错误
-    if (Master_ServoRead(a->slot, DEV_DICT_ROLE_ACTUAL_POS, &raw) ||
+    if ((a->has_position && Master_ServoRead(a->slot, DEV_DICT_ROLE_ACTUAL_POS, &raw)) ||
         Master_ServoRead(a->slot, DEV_DICT_ROLE_STATUS_WORD, &sw) ||
         Master_ServoRead(a->slot, DEV_DICT_ROLE_MODE_DISPLAY, &mode) ||
         (a->has_error && Master_ServoRead(a->slot, DEV_DICT_ROLE_ERROR_CODE, &error)) ||
         (a->has_speed && Master_ServoRead(a->slot, DEV_DICT_ROLE_ACTUAL_SPEED, &velocity)))
         return HAL_ERROR_BUS;
-    if (!a->sampled) a->counts = signed32(raw);
-    else {
-        double delta = signed32(raw - a->raw_pos);
-        if (a->cfg.feedback_wrap == HAL_WRAP_MODULAR) {
-            const double period = a->cfg.feedback_pulses_per_rev;
-            delta = remainder(delta, period);
+    if (a->has_position) {
+        if (!a->sampled) a->counts = signed32(raw);
+        else {
+            double delta = signed32(raw - a->raw_pos);
+            if (a->cfg.feedback_wrap == HAL_WRAP_MODULAR) {
+                const double period = a->cfg.feedback_pulses_per_rev;
+                delta = remainder(delta, period);
+            }
+            a->counts += delta;
         }
-        a->counts += delta;
+        a->raw_pos = raw;
+        a->status.actual_pos = a->counts * feedback_scale(a) + a->feedback_offset;
+        if (!a->sampled) a->status.command_pos = a->status.actual_pos;
     }
-    a->raw_pos = raw;
-    a->status.actual_pos = a->counts * feedback_scale(a) + a->feedback_offset;
     a->status.raw_status = (uint16_t)sw;
     a->status.error_code = (uint16_t)error;
     a->status.error_code_valid = a->has_error;
     a->status.enabled = (sw & DS402_SW_MASK_OP_ENABLED) == DS402_SW_VAL_OP_ENABLED;
-    a->status.position_valid = 1;
-    if (!a->sampled) a->status.command_pos = a->status.actual_pos;
+    a->status.position_valid = a->has_position;
     a->sampled = 1;
     a->mode = (int)mode;
     a->speed.mode = mode == DS402_MODE_CSP ? HAL_SPINDLE_CSP : mode == DS402_MODE_CSV ? HAL_SPINDLE_CSV : -1;
@@ -705,7 +712,7 @@ int32_t hal_rt_begin_cycle(HalContext* c) {
             }
         }
         /* 只在"命令与反馈坐标系不同"时才算预置目标值；同坐标系交给驱动层。 */
-        override_preset[i] = planned[i].preset_target &&
+        override_preset[i] = planned[i].preset_target && a->has_position &&
             (command_scale(a) != feedback_scale(a) ||
              a->command_offset != a->feedback_offset);
         /* 预置值超出 int32 就直接返回——此时**一个控制 PDO 都还没写**。 */
@@ -730,7 +737,7 @@ int32_t hal_rt_begin_cycle(HalContext* c) {
             return bus_error(c);
         }
         /* 同一计数坐标系沿用驱动层的原始 PDO 预置；不同坐标系才覆盖。 */
-        if (planned[i].preset_target) {
+        if (planned[i].preset_target && a->has_position) {
             if (override_preset[i] &&
                 Master_ServoWrite(a->slot, DEV_DICT_ROLE_TARGET_POS, presets[i])) return bus_error(c);
             a->status.command_pos = a->status.actual_pos;   /* 命令侧拉平到反馈，免得下一拍写位置时跳 */
@@ -740,7 +747,7 @@ int32_t hal_rt_begin_cycle(HalContext* c) {
         /* motion_ready = 已请求使能、且状态机这拍已 DONE。它是 write_* 的受理条件之一。 */
         a->motion_ready = a->request == DS402_REQ_ENABLE && planned[i].kind == DS402_STEP_DONE;
         /* 主轴首次就绪时把刻度基准锚在当前位置——此后 write_pos 的 deg 相对它算。 */
-        if (a->spindle && a->motion_ready && !a->angle_base_valid) {
+        if (a->spindle && a->has_position && a->motion_ready && !a->angle_base_valid) {
             a->status.command_pos = a->status.actual_pos;
             a->angle_base_valid = 1;
             a->angle_valid = 0;
@@ -873,7 +880,7 @@ int32_t hal_rt_axis_estop(HalContext* c, HalAxisId id) {
     a->stop_override = a->cfg.estop_action;
     a->stop_cycle = c->cycle_seq;
     if (a->reset_state == HAL_RESET_PENDING) a->reset_state = HAL_RESET_NONE;
-    a->desired_mode = a->mode == DS402_MODE_CSV ? DS402_MODE_CSV : DS402_MODE_CSP;
+    a->desired_mode = !a->has_position || a->mode == DS402_MODE_CSV ? DS402_MODE_CSV : DS402_MODE_CSP;
     return HAL_OK;
 }
 
@@ -910,6 +917,7 @@ int32_t hal_rt_axis_write_pos(HalContext* c, HalAxisId id, double pos) {
     int rc = gate(c); if (rc) return rc;
     Axis* a = find_axis(c, id);
     if (!a || !isfinite(pos)) return HAL_ERROR_ARGUMENT;
+    if (!a->has_position) return HAL_ERROR_UNSUPPORTED;
     if (preparing_csp(a)) return HAL_ERROR_BUSY;
     /* 受理条件整体不变，只把"没使能"与"模式不符"分出来，不拆成多段早期返回。 */
     if (c->phase != 2) return HAL_ERROR_NOT_RUNNING;   /* 调用时机，不是使能问题 */
@@ -946,6 +954,7 @@ int32_t hal_rt_axis_read_pos(HalContext* c, HalAxisId id, double* out) {
     if (!out) return HAL_ERROR_ARGUMENT;
     HalCAxisStatus status;
     const int rc = hal_rt_axis_read_status(c, id, &status);
+    if (!rc && !status.position_valid) return HAL_ERROR_UNSUPPORTED;
     if (!rc) *out = status.actual_pos;
     return rc;
 }
@@ -956,6 +965,7 @@ int32_t hal_rt_axis_set_pos(HalContext* c, HalAxisId id, double pos) {
     int rc = gate(c); if (rc) return rc;
     Axis* a = find_axis(c, id);
     if (!a || !isfinite(pos)) return HAL_ERROR_ARGUMENT;
+    if (!a->has_position) return HAL_ERROR_UNSUPPORTED;
     if (preparing_csp(a)) return HAL_ERROR_BUSY;
     if (!c->sampled) return HAL_ERROR_NOT_RUNNING;
     const double delta = pos - a->status.actual_pos;
@@ -997,7 +1007,7 @@ int32_t hal_rt_spindle_prepare_csp(HalContext* c, HalAxisId id, uint32_t timeout
     if (!timeout_ms) return HAL_ERROR_ARGUMENT;
     if (c->phase != 2 || !a->sampled) return HAL_ERROR_NOT_RUNNING;
     if (preparing_csp(a)) return HAL_ERROR_BUSY;
-    if (!a->has_speed) return HAL_ERROR_UNSUPPORTED;
+    if (!a->has_speed || !a->has_position) return HAL_ERROR_UNSUPPORTED;
     if (a->reset_state == HAL_RESET_PENDING || a->orient_state != HAL_ORIENT_NONE ||
         a->orient_release_pending || a->desired_mode != a->mode)
         return HAL_ERROR_BUSY;
@@ -1047,6 +1057,7 @@ int32_t hal_rt_spindle_request_mode(HalContext* c, HalAxisId id, HalSpindleMode 
     const int rc = spindle_gate(c, id); if (rc) return rc;
     if (mode != HAL_SPINDLE_CSV && mode != HAL_SPINDLE_CSP) return HAL_ERROR_ARGUMENT;
     Axis* a = find_axis(c, id);
+    if (mode == HAL_SPINDLE_CSP && !a->has_position) return HAL_ERROR_UNSUPPORTED;
     if (preparing_csp(a)) return HAL_ERROR_BUSY;
     const int desired = mode == HAL_SPINDLE_CSP ? DS402_MODE_CSP : DS402_MODE_CSV;
     if (a->desired_mode != desired) cancel_motion(a);
@@ -1172,6 +1183,7 @@ int32_t hal_rt_spindle_write_pos(HalContext* c, HalAxisId id, double deg) {
     if (rc) return rc;
     if (!isfinite(deg) || deg < -360.0 || deg > 360.0) return HAL_ERROR_ARGUMENT;
     Axis* a = find_axis(c, id);
+    if (!a->has_position) return HAL_ERROR_UNSUPPORTED;
     if (c->phase != 2 || !a->sampled) return HAL_ERROR_NOT_RUNNING;
     const double base = a->status.command_pos;
     double delta;

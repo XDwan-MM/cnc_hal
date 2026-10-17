@@ -1,4 +1,4 @@
-#include "common/devdict.h"
+#include "backend/greemaster/devdict.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -32,11 +32,14 @@ int main(int argc, char** argv) {
             DevDictObject o;
             if (strstr(path, "custom")) {
                 CHECK(DevDict_Lookup(1, 2, 0, &e) == 1);
-                CHECK(strcmp(e.profile, "custom") == 0 && e.object_count == 9);
+                const int velocity_only = strstr(path, "custom_velocity") != NULL;
+                CHECK(strcmp(e.profile, "custom") == 0 &&
+                      e.object_count == (velocity_only ? 7 : 9));
                 CHECK(DevDict_FindObject(&e, DEV_DICT_ROLE_STATUS_WORD, &o) == 1 &&
                       o.index == 0x6041 && o.bits == 16 && o.is_tx == 1);
-                CHECK(DevDict_FindObject(&e, DEV_DICT_ROLE_TARGET_POS, &o) == 1 &&
-                      o.index == 0x607A && o.bits == 32 && o.is_tx == 0);
+                CHECK(DevDict_FindObject(&e, DEV_DICT_ROLE_TARGET_POS, &o) == !velocity_only);
+                if (!velocity_only)
+                    CHECK(o.index == 0x607A && o.bits == 32 && o.is_tx == 0);
                 CHECK(DevDict_FindObject(&e, DEV_DICT_ROLE_OP_MODE, &o) == 1 &&
                       o.index == 0x6060 && o.bits == 8 && o.is_tx == 0);
             } else if (strstr(path, "hex")) {

@@ -15,7 +15,7 @@
 >
 > **4.0 相对 3.0 的变化**：新增 `hal_rt_axis_fault_reset()` 与 `hal_rt_axis_fault_reset_state()`
 > 两个周期接口、新增 `hal_bus_health()` 非周期查询，`HalCConfig` 新增
-> `fault_reset_timeout_ms` 字段。函数增删按本工程的版本策略属 MAJOR，消费者须重编。本文以 `include/` 中的声明及 `src/internal/` 中的实现为准。厂商 SDK、`src/Greemaster/` 内部函数和 `examples/` 测试辅助函数不属于公开 API。
+> `fault_reset_timeout_ms` 字段。函数增删按本工程的版本策略属 MAJOR，消费者须重编。本文以 `include/` 中的声明及 `src/core/` 中的实现为准。厂商 SDK、`src/backend/greemaster/` 内部函数和 `examples/` 测试辅助函数不属于公开 API。
 
 ## 1. 引入与调用流程
 
@@ -1667,6 +1667,6 @@ X/Y 所需的最小长度在 `start` 时由配置的起始地址和实际 PDO �
 
 ## 6. 构建与设备字典
 
-公开头文件安装在 `include/`，共享库名为 `cnc_hal`。项目 CMake 构建需要 GREEMASTER SDK、`libxml2`、线程库；安装时设备字典 `devices.json` 会安装到 `${CMAKE_INSTALL_DATADIR}/cnc_hal`。从构建树运行时可设置 `CNC_HAL_DEVICES_JSON` 指向源码树中的 `src/Greemaster/devices.json`。具体编译和上机命令见 `examples/测试用例用法.md`。
+公开头文件安装在 `include/`，共享库名为 `cnc_hal`。项目 CMake 构建需要 GREEMASTER SDK、`libxml2`、线程库；安装时设备字典 `devices.json` 会安装到 `${CMAKE_INSTALL_DATADIR}/cnc_hal`。从构建树运行时可设置 `CNC_HAL_DEVICES_JSON` 指向源码树中的 `config/devices.json`。具体编译和上机命令见 `docs/测试用例用法.md`。
 
 当前设备字典按 vendor ID、product code、revision 匹配设备类型和既有对象映射。新增设备能否启动取决于身份匹配、设备类型、现有 PDO 及启动时的绑定检查；仅有 CoE 对象定义并不足以让本版自动映射或调用该功能。

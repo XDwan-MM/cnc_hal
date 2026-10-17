@@ -50,7 +50,7 @@ int hal_hardware_test_config(HalCConfig* config, HalHardwareTestSettings* settin
      * 本函数自 2026-09-24 起就是**填好的台架默认配置**（末尾 return 0），
      * 不是「待填模板」——早期「把 return -1 改成 return 0」的说法已经作废。
      * 已按现有记录填入：主站参数、从站顺序、伺服当量/每转计数/enc_off、急停动作。
-     * 仍未确认的项见 examples/测试用例用法.md 顶部的「当前配置状态」。
+     * 仍未确认的项见 docs/测试用例用法.md 顶部的「当前配置状态」。
      */
      config->cycle_us = 1000;            // >= 250
      config->start_timeout_ms = 120000;

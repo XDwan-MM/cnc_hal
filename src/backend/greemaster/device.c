@@ -1,7 +1,7 @@
 #include "device.h"
-#include "main_demo.h"
+#include "master.h"
 #include "slave_list.h"
-#include "common/devdict.h"
+#include "backend/greemaster/devdict.h"
 
 static int position = 0;   /* 装配期槽推进游标，仅本文件用 */
 static char g_bind_error[192];
@@ -416,6 +416,24 @@ static int find_object(const Slave_info* slave, const DevDictObject* object,
     return found ? 0 : -1;
 }
 
+static int axis4_torque_entry(const Slave_info* slave, uint32_t axis, uint32_t* entry_pos) {
+    uint32_t pdo_pos = 0;
+    for (const sm_info* sm = slave->sm_list; sm; sm = sm->next) {
+        if (!sm->sm_Enable || sm->sm_TR != Tx) continue;
+        for (const pdo_info* pdo = sm->pdo_list; pdo; pdo = pdo->next, ++pdo_pos) {
+            if (pdo_pos != axis) continue;
+            uint32_t pos = 0;
+            for (const pdo_entry_info* entry = pdo->entry_list; entry; entry = entry->next, ++pos)
+                if (entry->pdo_entry_index == 0x6077 && entry->pdo_entry_subindex == 0) {
+                    *entry_pos = pos;
+                    return 1;
+                }
+            return 0;
+        }
+    }
+    return 0;
+}
+
 int servo_addr_config(Slave_info* list, uint32_t slave_pos, uint32_t slot) {
     if (slave_pos >= MAX_DEVICE_NUM || slot >= MAX_DEVICE_NUM) return -1;
     Slave_info* slave = find_slave(list, slave_pos);
@@ -435,8 +453,7 @@ int servo_addr_config(Slave_info* list, uint32_t slave_pos, uint32_t slot) {
         uint32_t pdo, entry;
         const DevDictRole role = objects[i].role;
         const int required = role == DEV_DICT_ROLE_STATUS_WORD ||
-            role == DEV_DICT_ROLE_ACTUAL_POS || role == DEV_DICT_ROLE_MODE_DISPLAY ||
-            role == DEV_DICT_ROLE_CONTROL_WORD || role == DEV_DICT_ROLE_TARGET_POS ||
+            role == DEV_DICT_ROLE_MODE_DISPLAY || role == DEV_DICT_ROLE_CONTROL_WORD ||
             role == DEV_DICT_ROLE_OP_MODE;
         if (find_object(slave, &objects[i], &pdo, &entry) != 0) {
             if (required) {
@@ -450,11 +467,10 @@ int servo_addr_config(Slave_info* list, uint32_t slave_pos, uint32_t slot) {
         if (bind_servo_role(list, slave_pos, slot, &objects[i], pdo, entry, 0) != 0)
             return -1;
     }
-    /* 只查六个必需角色是否绑上（位长非 0）；位长够不够由 HAL 按角色判。 */
+    /* 位置与扭矩是可选能力；进给轴的位置要求由 HAL 按轴类型校验。 */
     const slave_addr* h = &g_device_data[slot].slave;
-    if (!h->statusWord.bit_length || !h->act_pos.bit_length || !h->act_mode.bit_length ||
-        !h->Control_word.bit_length || !h->target_pos.bit_length ||
-        !h->Modes_of_operation.bit_length) {
+    if (!h->statusWord.bit_length || !h->act_mode.bit_length ||
+        !h->Control_word.bit_length || !h->Modes_of_operation.bit_length) {
         snprintf(g_bind_error, sizeof(g_bind_error),
                  "从站 %u 槽 %u 缺少必需 DS402 角色", slave_pos, slot);
         return -1;
@@ -471,12 +487,21 @@ static int bind_multi_axis(Slave_info* list, uint32_t slot, uint32_t slave_pos, 
         for (size_t i = 0; i < sizeof(kDs402Std) / sizeof(kDs402Std[0]); ++i) {
             DevDictObject object = kDs402Std[i];
             uint32_t pdo = axis;
+            uint32_t entry = axis4_entries[i];
             if (axes == 6) {
                 object.index += 2048 * axis;
                 pdo = (object.is_tx ? 0x1A00 : 0x1600) + 16 * axis;
             }
+            if (object.role == DEV_DICT_ROLE_ACTUAL_TORQUE) {
+                Slave_info* slave = find_slave(list, slave_pos);
+                uint32_t found_pdo, found_entry;
+                if (!slave || (axes == 6
+                    ? find_object(slave, &object, &found_pdo, &found_entry) != 0
+                    : !axis4_torque_entry(slave, axis, &entry)))
+                    continue;
+            }
             if (bind_servo_role(list, slave_pos, slot + axis, &object,
-                                pdo, axis4_entries[i], axes == 6) != 0) return -1;
+                                pdo, entry, axes == 6) != 0) return -1;
         }
     }
     return 0;

@@ -167,7 +167,7 @@ typedef struct {
 
 typedef struct {
     int32_t  enabled;                   /* 非零 = DS402 已到 OperationEnabled */
-    int32_t  position_valid;            /* 非零 = 坐标可信；当前恒为 1。上层一律按「可能不可信」写 */
+    int32_t  position_valid;            /* 非零 = 实际位置与目标位置 PDO 可用；速度型主轴可能为 0 */
     double   actual_pos;                /* 用户单位 */
     double   command_pos;               /* 用户单位 */
     double   actual_speed;              /* 实际速度原始值：单位即驱动器速度对象（0x606C）的单位，HAL 不换算。
@@ -186,7 +186,7 @@ typedef struct {
     int32_t  mode;                      /* HAL_SPINDLE_CSV / _CSP，来自 0x6061 */
     double   command_speed;             /* rpm，带符号：正=正转 M03，负=反转 M04 */
     double   actual_speed;              /* rpm（HAL 已按 speed_unit 换算）——「停稳」判据（转速 < 5）用它，必须是 rpm */
-    double   position_deg;              /* 累计转角（度）。HAL **不取模** */
+    double   position_deg;              /* 累计转角（度），不取模；无位置能力时为 0 */
     uint16_t raw_status;
 } HalCSpindleStatus;
 

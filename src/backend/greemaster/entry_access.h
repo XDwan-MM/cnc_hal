@@ -2,7 +2,7 @@
 
 #include <stdint.h>
 #include "export.h"
-#include "common/devdict.h"   /* DevDictRole */
+#include "backend/greemaster/devdict.h"   /* DevDictRole */
 
 #ifdef __cplusplus
 extern "C" {

@@ -20,10 +20,10 @@ OUT.mkdir(parents=True, exist_ok=True)
 BUILD_ONLY = options.build_only
 ENV = dict(os.environ, ASAN_OPTIONS="detect_leaks=1:halt_on_error=1",
            UBSAN_OPTIONS="halt_on_error=1:print_stacktrace=1",
-           CNC_HAL_DEVICES_JSON=str(ROOT/"src/Greemaster/devices.json"))
+           CNC_HAL_DEVICES_JSON=str(ROOT/"config/devices.json"))
 FLAGS = ["-g", "-O1", "-Wall", "-Wextra", "-Werror", "-fno-omit-frame-pointer",
          "-fno-pie", "-no-pie", "-fsanitize=address,undefined", "-fno-sanitize-recover=all",
-         "-ffunction-sections", "-fdata-sections", "-Isrc", "-Isrc/Greemaster"]
+         "-ffunction-sections", "-fdata-sections", "-Isrc", "-Isrc/backend/greemaster"]
 def run(name, args, input=None):
     result = subprocess.run(list(map(str, args)), cwd=ROOT, env=ENV, input=input,
                             text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
@@ -39,29 +39,29 @@ def build(name, sources, cpp=False, extra=()):
         *FLAGS, *extra, *sources, "-Wl,--gc-sections", "-o", exe])
     return exe
 
-for source in sorted((ROOT/"src/Greemaster").glob("*.c")) + list((ROOT/"src/common").glob("*.c")):
+for source in sorted((ROOT/"src/backend/greemaster").glob("*.c")):
     run("syntax-"+source.stem, ["gcc", "-std=gnu11", "-Wall", "-Wextra", "-Werror",
-        "-Isrc", "-Isrc/Greemaster", "-fsyntax-only", source])
+        "-Isrc", "-Isrc/backend/greemaster", "-fsyntax-only", source])
 for compiler, language, std in [("gcc","c","c11"),("g++","c++","c++17")]:
     run("abi-"+std, [compiler, "-std="+std, "-pedantic-errors", "-Wall", "-Wextra",
         "-Werror", "-Iinclude", "-x", language, "-fsyntax-only", "-"],
         '#include "hal_c_api.h"\n')
 print("Source and public ABI checks passed")
 
-config_test = build("config_regression", ["test/config_regression.c", "src/internal/hal_config.c"],
+config_test = build("config_regression", ["test/config_regression.c", "src/core/hal_config.c"],
                     extra=["-Iinclude"])
 if not BUILD_ONLY:
     print(run("config_regression", [config_test]).strip())
 
 context_test = build("context_regression", ["test/context_regression.c",
-                     "src/internal/hal_context.c", "src/internal/hal_config.c"],
+                     "src/core/hal_context.c", "src/core/hal_config.c"],
                      extra=["-Iinclude", "-Wl,--wrap=calloc", "-lm", "-pthread"])
 if not BUILD_ONLY:
     print(run("context_regression", [context_test]).strip())
 
 driver = build("driver_regression", ["test/driver_regression.c",
-    "src/Greemaster/main_demo.c", "src/Greemaster/slave_list.c", "src/Greemaster/servo_step.c",
-    "src/Greemaster/entry_access.c", "src/Greemaster/device_table.c", "src/common/devdict.c"],
+    "src/backend/greemaster/master.c", "src/backend/greemaster/slave_list.c", "src/backend/greemaster/servo_step.c",
+    "src/backend/greemaster/entry_access.c", "src/backend/greemaster/device_table.c", "src/backend/greemaster/devdict.c"],
     extra=["-Wno-unused-parameter", "-Wl,--wrap=calloc", "-Wl,--wrap=clock_gettime"])
 if not BUILD_ONLY:
     print(run("driver_regression", [driver]).strip().splitlines()[-1])
@@ -69,7 +69,7 @@ if not BUILD_ONLY:
 ds402 = build("ds402", ["test/ds402_test.c"])
 if not BUILD_ONLY:
     print("DS402:", run("ds402", [ds402]).strip().splitlines()[-1])
-# 原先这里编 src/internal/DeviceBase.cpp + test/device_base_test.cpp。
+# 原先这里编 src/core/DeviceBase.cpp + test/device_base_test.cpp。
 # 2026-10-04：未构建的 C++ 接口层（IDevice/DeviceBase/ConfigModel/IDIO）已整体删除，
 # 它不产出任何库、也没有公共入口，只由这个用例单独编着。
 
@@ -123,6 +123,10 @@ roles={"status_word":(0x6041,16,"tx"),"control_word":(0x6040,16,"rx"),
        "mode_display":(0x6061,8,"tx")}
 custom["devices"][0]["objects"]={k:dict(index=hex(v[0]),bits=v[1],dir=v[2]) for k,v in roles.items()}
 case("custom",custom,True)
+doc=copy.deepcopy(custom)
+del doc["devices"][0]["objects"]["target_pos"]
+del doc["devices"][0]["objects"]["actual_pos"]
+case("custom_velocity",doc,True)
 for field,values in {"index":[0,65536,-1,"bad"],"sub":[256,-1,"bad"],
                       "bits":[24,264,0,32],"dir":["rx",0],"bitz":[16]}.items():
     for i,value in enumerate(values):
@@ -134,9 +138,9 @@ case("missing_mode_display",doc)
 doc=copy.deepcopy(custom);doc["devices"][0]["objects"]["error_code"]["index"]="0x6041"
 case("duplicate_object",doc)
 cases.append("-"+str(OUT/"missing.json"))
-dictionary=build("dictionary_regression",["test/dictionary_regression.c","src/common/devdict.c"], extra=["-Wl,--wrap=malloc"])
+dictionary=build("dictionary_regression",["test/dictionary_regression.c","src/backend/greemaster/devdict.c"], extra=["-Wl,--wrap=malloc"])
 if not BUILD_ONLY:
-    print(run("dictionary_regression",[dictionary,ROOT/"src/Greemaster/devices.json",*cases]).strip())
+    print(run("dictionary_regression",[dictionary,ROOT/"config/devices.json",*cases]).strip())
 
 # RT 候选包用例依赖仓库外的 cnc_rt 副本，所以只在给了 RT_CANDIDATE_DIR 时编跑。
 rt_dir = os.environ.get("RT_CANDIDATE_DIR")
