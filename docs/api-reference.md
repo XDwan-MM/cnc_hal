@@ -1,6 +1,6 @@
 # CNC HAL C API 接口文档
 
-适用范围：当前公开 C ABI 7.2（`HAL_C_ABI_MAJOR=7`，`HAL_C_ABI_MINOR=2`）。
+适用范围：当前公开 C ABI 7.3（`HAL_C_ABI_MAJOR=7`，`HAL_C_ABI_MINOR=3`）。
 > 2026-10-04 修复重新使能、故障复位、停止隔离、CSV 方向和 DC 配置传递；同日二次审查修正了使能状态掩码与撤销电压停止优先级。
 > **7.0 相对 6.0 的变化**：只做两件事，都是"把不属于 HAL 的判定挪走"。
 > **删字段**：`HalCSpindleCfg.accel`（HAL 不生成加减速曲线，纯占位）、
@@ -65,8 +65,8 @@ if (rc == HAL_OK) {
 
 | 成员 | 类型 | 要求与含义 |
 | --- | --- | --- |
-| `abi_major` | `uint16_t` | 必须 `== HAL_C_ABI_MAJOR`（当前 **5**）。契约／语义变更时升它。 |
-| `abi_minor` | `uint16_t` | 必须 `== HAL_C_ABI_MINOR`（当前 **0**）。**结构布局变更**（字段增删改序）时升它。 |
+| `abi_major` | `uint16_t` | 必须 `== HAL_C_ABI_MAJOR`（当前 **7**）。契约／语义变更时升它。 |
+| `abi_minor` | `uint16_t` | 必须 `== HAL_C_ABI_MINOR`（当前 **3**）。**结构布局变更**（字段增删改序）时升它。 |
 | `struct_size` | `uint16_t` | 必须 `== sizeof(HalCConfig)`，**精确相等**而不是「至少」—— 它是唯一能挡住字段插入的检查。 |
 | `reserved` | `uint16_t` | 必须为 `0`。显式填充位，不依赖编译器对齐。 |
 | `topology_fingerprint` | `uint64_t` | **当前必须为 `0`**。指纹算法未定，非零值会被直接拒绝，**不会静默跳过比对**。 |
@@ -111,6 +111,8 @@ IO／面板也不能与伺服重复占用同一从站。
 | `command_invert` | `int32_t` | 非零 = 位置及主轴 CSV 转速命令方向取反。 |
 | `feedback_invert` | `int32_t` | 非零 = 位置及主轴 CSV 转速反馈方向取反。**与命令分开配置**，理由同上。 |
 | `enc_off` | `double` | 已保存的坐标偏置，单位 mm（直线轴）或 deg（回转轴），须有限。**初始显示坐标 = 原始反馈换算值 − 该偏置**，沿用旧 RT 的符号约定。它是**软件偏置，不会写入驱动器的电子齿轮对象**。运行时重新标定请用 `hal_rt_axis_set_pos()`。 |
+| `speed_unit` | `int32_t` | `HAL_SPEED_RPM` 或 `HAL_SPEED_PULSES_PER_S`，对应驱动器 `0x606C/0x60FF` 的单位。 |
+| `command_pulses_per_rev` | `int32_t` | 每转指令脉冲数。脉冲/秒模式必须大于 0；进给轴需返回有效 mm/min 时也必须大于 0。 |
 
 **关于 `feedback_wrap` 的选型**：
 
@@ -1178,14 +1180,19 @@ int32_t hal_rt_axis_read_status(HalContext *c, HalAxisId id, HalCAxisStatus *out
 | 字段 | 含义 |
 | --- | --- |
 | `enabled` | 非零 = DS402 已到 OperationEnabled。**取自状态字的判定，不是 HAL 的推断** |
-| `position_valid` | 坐标是否可信。**当前恒为 1** |
+| `position_valid` | 实际位置和目标位置 PDO 都可用时为 1；速度型主轴可能为 0 |
 | `actual_pos` | 实际位置（用户单位） |
 | `command_pos` | 最近下发的指令位置（用户单位），由写接口更新 |
-| `actual_speed` | 实际速度。**单位是驱动器速度对象（`0x606C`）的单位，HAL 不做任何换算**——常见是 rpm，也可能是 mm/s，取决于每台驱动器怎么配。`speed_valid` 为 0 时它恒为 0，此时「0」表示**不可得**，不是「静止」。与 `HalCSpindleStatus.actual_speed` 同源（同一个读数，含 `feedback_invert`） |
+| `actual_speed` | `0x606C` 的原始速度值，按 `feedback_invert` 修正符号；单位由 `speed_unit` 指定（rpm 或脉冲/秒）。`speed_valid` 为 0 时无意义 |
+| `actual_speed_rpm` | 同一读数换算为 rpm；脉冲/秒时乘 60 再除以 `command_pulses_per_rev` |
 | `speed_valid` | 非零 = 该轴映射了速度 PDO（`0x606C` 与 `0x60FF` 都是 32 位），`actual_speed` 才有意义。主轴上恒为 1——HAL 在 bind 阶段就拒绝没有速度 PDO 的主轴 |
 | `raw_status` | 原始 DS402 状态字 `0x6041` |
 | `error_code` | 驱动器故障码 `0x603F` |
 | `error_code_valid` | 故障码是否有效；`0x603F` 未绑定时为 0 |
+| `actual_speed_mm_min` | 进给轴线速度，`actual_speed_rpm × command_pulses_per_rev × command_units_per_count`，单位 mm/min；保留方向符号 |
+| `linear_speed_valid` | 非零 = 进给轴有速度 PDO，且 `command_pulses_per_rev > 0`；为 0 时不得把 `actual_speed_mm_min` 的 0 当成已停稳。主轴恒为 0 |
+
+`actual_speed_mm_min` 假定进给轴的 `command_units_per_count` 以 mm/计数配置；若轴使用其他位置单位，该数值实际上是相应用户单位/分钟。
 
 **函数参数及返回值**
 

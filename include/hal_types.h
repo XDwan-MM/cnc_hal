@@ -15,7 +15,7 @@
 #include <stdint.h>
 
 #define HAL_C_ABI_MAJOR  7u     /* 契约/语义版本：函数增删、返回码含义变 */
-#define HAL_C_ABI_MINOR  2u     /* 结构布局版本：字段增删改序 */
+#define HAL_C_ABI_MINOR  3u     /* 结构布局版本：字段增删改序 */
 
 /* ---- HAL 发行版本 ---- */
 #define HAL_VERSION_MAJOR  0u       /* 主版本 */
@@ -57,7 +57,7 @@ typedef struct {
 #define HAL_ENC_INCREMENTAL_Z 1   /* 增量式、带 Z 相；回零策略不归 HAL */
 #define HAL_ENC_ABSOLUTE      3   /* 绝对式 */
 
-/* 驱动器速度对象（0x606C 读 / 0x60FF 写）的单位。HAL 对外速度口径永远是 rpm：
+/* 驱动器速度对象（0x606C 读 / 0x60FF 写）的单位。HAL 同时提供原始速度与换算后的 rpm：
  *   HAL_SPEED_RPM          —— 驱动器本身就是 rpm（蓝海华腾 C2-00 = 0）；
  *   HAL_SPEED_PULSES_PER_S —— 驱动器是脉冲/秒（蓝海华腾 C2-00 出厂默认），
  *                             HAL 用 command_pulses_per_rev 双向换算。
@@ -94,7 +94,7 @@ typedef struct {
     double  command_units_per_count;    /* 命令当量（用户单位/脉冲），> 0；1 mm = 10000 命令计数则填 0.0001 */
     double  feedback_units_per_count;   /* 反馈当量，> 0。可与命令不同 */
     int32_t command_invert;             /* 非零 = 位置及主轴 CSV 转速命令方向取反 */
-    int32_t feedback_invert;            /* 非零 = 反馈方向取反；与命令分开（外接编码器/光栅尺可能只需翻反馈） */
+    int32_t feedback_invert;            /* 非零 = 位置及速度反馈方向取反；与命令分开 */
     double  enc_off;                    /* 已保存的坐标偏置（原始位置 - enc_off） */
 
     /* ---- 主轴定向（厂商专有，可选）----
@@ -111,9 +111,9 @@ typedef struct {
 
     /* ---- 速度对象单位（驱动器专有）----
      * 取值见 HAL_SPEED_*；默认 0（rpm）。填 pulse/s 时必须同时给
-     * command_pulses_per_rev（不配会被拒）。 */
+     * command_pulses_per_rev（不配会被拒）；进给轴返回 mm/min 也需要它。 */
     int32_t  speed_unit;                 /* 0 = rpm；1 = pulse/s */
-    int32_t  command_pulses_per_rev;     /* 每转指令脉冲数；只在 pulse/s 时用于换算（写 rpm→pulse/s、读 pulse/s→rpm） */
+    int32_t  command_pulses_per_rev;     /* 每转指令脉冲数；pulse/s↔rpm 及进给轴 mm/min 换算使用 */
 } HalCAxisCfg;
 
 /* 主轴 —— 通用轴属性之上加转速上限（定向与运行期 CSV↔CSP 切换是主轴专有）。
@@ -179,6 +179,8 @@ typedef struct {
     uint16_t raw_status;                /* 原始状态字 0x6041，诊断用 */
     uint16_t error_code;                /* 驱动器故障码 0x603F */
     int32_t  error_code_valid;          /* 0x603F 未映射时为 0，error_code 此时无效 */
+    double   actual_speed_mm_min;       /* 进给轴实际线速度，mm/min；主轴及无效时为 0 */
+    int32_t  linear_speed_valid;        /* 非零 = 进给轴有速度 PDO 且配置了每转指令脉冲数 */
 } HalCAxisStatus;
 
 typedef struct {

@@ -646,7 +646,12 @@ static int sample_axis(Axis* a) {
     a->status.actual_speed = raw_speed;
     a->status.actual_speed_rpm = speed_rpm;
     a->status.speed_valid = a->has_speed;
-    if (!isfinite(a->status.actual_pos) || !isfinite(speed_rpm)) return HAL_ERROR_BUS;
+    a->status.linear_speed_valid = !a->spindle && a->has_speed &&
+        a->cfg.command_pulses_per_rev > 0;
+    a->status.actual_speed_mm_min = a->status.linear_speed_valid ?
+        speed_rpm * (double)a->cfg.command_pulses_per_rev * a->cfg.command_units_per_count : 0.0;
+    if (!isfinite(a->status.actual_pos) || !isfinite(speed_rpm) ||
+        !isfinite(a->status.actual_speed_mm_min)) return HAL_ERROR_BUS;
     return HAL_OK;
 }
 

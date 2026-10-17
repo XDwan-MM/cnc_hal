@@ -314,7 +314,8 @@ static void optional_capabilities(void) {
     CHECK(hal_axis_capability(c, 3, HAL_FUNC_SPEED, &cap) == 0 && cap.state == HAL_CAP_READY);
     cycle(c);
     HalCAxisStatus status;
-    CHECK(hal_rt_axis_read_status(c, 7, &status) == 0 && !status.error_code_valid);
+    CHECK(hal_rt_axis_read_status(c, 7, &status) == 0 && !status.error_code_valid &&
+          !status.linear_speed_valid && status.actual_speed_mm_min == 0);
     CHECK(hal_rt_axis_read_status(c, 3, &status) == 0 && status.error_code_valid);
     /* 实际速度也要能从**轴状态**里读到：进给轴拿不到 hal_rt_spindle_read_speed（它要求
      * 主轴），而进给率显示要这个数。上面 capability 已经断言过这两根轴一个有速度 PDO、
@@ -338,6 +339,44 @@ static void optional_capabilities(void) {
     CHECK(strstr(error, "从站 0 轴 0") && strstr(error, "主轴速度"));
     hal_context_destroy(c);
     omit_spindle_speed = 0;
+}
+
+static void feed_speed_mm_min(void) {
+    HalCConfig cfg = config();
+    cfg.axes[0].command_pulses_per_rev = 2000;
+    HalContext* c = create(&cfg);
+    CHECK(hal_context_start(c, NULL, 0) == 0);
+    servo[1][DEV_DICT_ROLE_ACTUAL_SPEED] = 120;
+    cycle(c);
+    HalCAxisStatus status;
+    CHECK(hal_rt_axis_read_status(c, 7, &status) == 0);
+    CHECK(status.speed_valid && status.linear_speed_valid);
+    CHECK(status.actual_speed == 120 && status.actual_speed_rpm == 120);
+    CHECK(status.actual_speed_mm_min == 24000);
+    CHECK(hal_rt_axis_read_status(c, 3, &status) == 0 &&
+          !status.linear_speed_valid && status.actual_speed_mm_min == 0);
+    hal_context_destroy(c);
+
+    cfg.axes[0].speed_unit = HAL_SPEED_PULSES_PER_S;
+    cfg.axes[0].feedback_invert = 1;
+    c = create(&cfg);
+    CHECK(hal_context_start(c, NULL, 0) == 0);
+    servo[1][DEV_DICT_ROLE_ACTUAL_SPEED] = 1000;
+    cycle(c);
+    CHECK(hal_rt_axis_read_status(c, 7, &status) == 0);
+    CHECK(status.actual_speed == -1000 && status.actual_speed_rpm == -30);
+    CHECK(status.linear_speed_valid && status.actual_speed_mm_min == -6000);
+    hal_context_destroy(c);
+
+    cfg.axes[0].speed_unit = HAL_SPEED_RPM;
+    cfg.axes[0].command_pulses_per_rev = 0;
+    c = create(&cfg);
+    CHECK(hal_context_start(c, NULL, 0) == 0);
+    cycle(c);
+    CHECK(hal_rt_axis_read_status(c, 7, &status) == 0 &&
+          status.speed_valid && !status.linear_speed_valid &&
+          status.actual_speed_mm_min == 0);
+    hal_context_destroy(c);
 }
 
 static void velocity_only_spindle(void) {
@@ -1691,7 +1730,7 @@ static void spindle_prepare_csp(void) {
 }
 
 int main(void) {
-    lifecycle(); binding(); optional_capabilities(); velocity_only_spindle(); motion_io(); wrap_and_faults();
+    lifecycle(); binding(); optional_capabilities(); feed_speed_mm_min(); velocity_only_spindle(); motion_io(); wrap_and_faults();
     stop_overrides_staged_enable(); concurrent_stop();
     preset_overflow_probe(); spindle_origin_angle(); angle_regressions();
     pdo_width_policy();
