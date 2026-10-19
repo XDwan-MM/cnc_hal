@@ -30,6 +30,9 @@ typedef struct {
 #define MASTER_DEVICE_DICTIONARY_ERROR (-28675)
 const char* Master_StartupError(void);
 int Master_SlaveCount(void);
+/* 仅非实时线程调用；返回 0 成功，-2 超时，-3 SDO 应答错误，-4 主站停止。 */
+int Master_SdoTransfer(int slave_pos, uint16_t index, uint8_t subindex,
+                       void* data, uint16_t size, int write, uint32_t timeout_ms);
 /* 打断标志的取址与查询：device.c 的 EEPROM / PDO 映射读取要用，才能被停下来。 */
 
 int* Master_InterruptFlag(void);

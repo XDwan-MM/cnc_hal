@@ -128,6 +128,60 @@ static int extract_pdos(const Slave_info* slave, uint32_t direction, PDO_RESULT*
     return 0;
 }
 
+/* EEPROM/当前映射缺少反馈对象时，在计算主站配置前补入 TxPDO。 */
+static int complete_servo_tx_pdos(const DEVICE_BASIC_INFO* info, PDO_RESULT* tx) {
+    const int axes = device_slot_count((DEVICE_TYPE)info->type);
+    if (info->type != SERVO_TYPE && info->type != GREE_AXIS4_TYPE &&
+        info->type != GREE_AXIS6_TYPE) return 0;
+    const int blue = info->ID == 5596774u && info->CODE == 40200u;
+    static const struct { uint16_t index; uint8_t bits; } feedback[] = {
+        {0x6061, 8}, {0x603F, 16}, {0x606C, 32}, {0x6077, 16}
+    };
+    for (int axis = 0; axis < axes; ++axis) {
+        VALID_PDO_INFO* pdo = NULL;
+        if (axes == 1) {
+            for (int i = 0; i < tx->count; ++i) {
+                for (int j = 0; j < tx->validPdos[i].entryCount; ++j)
+                    if (tx->validPdos[i].entries[j].index == 0x6041)
+                        pdo = &tx->validPdos[i];
+            }
+        } else if (axis < tx->count) {
+            pdo = &tx->validPdos[axis];
+        }
+        if (!pdo) return -1;
+        const uint16_t offset = (uint16_t)(0x800u * axis);
+        for (size_t k = 0; k < sizeof(feedback) / sizeof(feedback[0]); ++k) {
+            if (blue && feedback[k].index != 0x603F) continue;
+            const uint16_t index = (uint16_t)(feedback[k].index + offset);
+            int found = 0;
+            for (int j = 0; j < pdo->entryCount; ++j)
+                if (pdo->entries[j].index == index && pdo->entries[j].subIndex == 0)
+                    ++found;
+            if (found > 1) return -1;
+            if (found) continue;
+            int target = pdo->entryCount;
+            if (blue && target >= 8) {
+                const PDO_ENTRY_ITEM* last = &pdo->entries[target - 1];
+                /* 仅蓝海华腾满 8 项时，替换填充或可选扭矩反馈。 */
+                if ((last->index != 0 && last->index != 0x6077) ||
+                    last->bitLen != 16) return -1;
+                target -= 1;
+            } else if (target >= MAX_ENTRY_PER_PDO || (blue && target >= 8)) {
+                return -1;
+            }
+            PDO_ENTRY_ITEM* item = &pdo->entries[target];
+            memset(item, 0, sizeof(*item));
+            item->index = index;
+            item->bitLen = feedback[k].bits;
+            if (target == pdo->entryCount) {
+                ++pdo->entryCount;
+                pdo->headerInfo.entryCount = (uint8_t)pdo->entryCount;
+            }
+        }
+    }
+    return 0;
+}
+
 int calculate_tx_bit(PDO_RESULT* TX_pdo_result) {
     int tx_bit = 0;
     for (int i = 0; i < TX_pdo_result->count; i++) {
@@ -287,6 +341,8 @@ static int COERequestResult(const DEVICE_BASIC_INFO* info, const unsigned char* 
         if (rc != 0 || freed != 0) return -1;
     }
 
+    if (complete_servo_tx_pdos(info, &tx) != 0) return -1;
+
     const int tx_bits = calculate_tx_bit(&tx), rx_bits = calcute_rx_bit(&rx);
     Slave_info* slave = create_empty_slave(slave_pos);
     if (!slave) return -1;
@@ -416,24 +472,6 @@ static int find_object(const Slave_info* slave, const DevDictObject* object,
     return found ? 0 : -1;
 }
 
-static int axis4_torque_entry(const Slave_info* slave, uint32_t axis, uint32_t* entry_pos) {
-    uint32_t pdo_pos = 0;
-    for (const sm_info* sm = slave->sm_list; sm; sm = sm->next) {
-        if (!sm->sm_Enable || sm->sm_TR != Tx) continue;
-        for (const pdo_info* pdo = sm->pdo_list; pdo; pdo = pdo->next, ++pdo_pos) {
-            if (pdo_pos != axis) continue;
-            uint32_t pos = 0;
-            for (const pdo_entry_info* entry = pdo->entry_list; entry; entry = entry->next, ++pos)
-                if (entry->pdo_entry_index == 0x6077 && entry->pdo_entry_subindex == 0) {
-                    *entry_pos = pos;
-                    return 1;
-                }
-            return 0;
-        }
-    }
-    return 0;
-}
-
 int servo_addr_config(Slave_info* list, uint32_t slave_pos, uint32_t slot) {
     if (slave_pos >= MAX_DEVICE_NUM || slot >= MAX_DEVICE_NUM) return -1;
     Slave_info* slave = find_slave(list, slave_pos);
@@ -481,27 +519,27 @@ int servo_addr_config(Slave_info* list, uint32_t slave_pos, uint32_t slot) {
 static int bind_multi_axis(Slave_info* list, uint32_t slot, uint32_t slave_pos, int axes) {
     if (!list || slave_pos >= MAX_DEVICE_NUM || slot > MAX_DEVICE_NUM - (uint32_t)axes)
         return -1;
-    /* axis4 按 PDO 内位置；axis6 按每轴对象号偏移。顺序对应 kDs402Std。 */
-    static const uint8_t axis4_entries[] = {0, 2, 1, 5, 3, 4, 0, 2, 3, 1};
+    Slave_info* slave = find_slave(list, slave_pos);
+    if (!slave) return -1;
     for (int axis = 0; axis < axes; ++axis) {
         for (size_t i = 0; i < sizeof(kDs402Std) / sizeof(kDs402Std[0]); ++i) {
             DevDictObject object = kDs402Std[i];
-            uint32_t pdo = axis;
-            uint32_t entry = axis4_entries[i];
-            if (axes == 6) {
-                object.index += 2048 * axis;
-                pdo = (object.is_tx ? 0x1A00 : 0x1600) + 16 * axis;
-            }
-            if (object.role == DEV_DICT_ROLE_ACTUAL_TORQUE) {
-                Slave_info* slave = find_slave(list, slave_pos);
-                uint32_t found_pdo, found_entry;
-                if (!slave || (axes == 6
-                    ? find_object(slave, &object, &found_pdo, &found_entry) != 0
-                    : !axis4_torque_entry(slave, axis, &entry)))
-                    continue;
+            object.index = (uint16_t)(object.index + 0x800u * axis);
+            uint32_t pdo, entry;
+            if (find_object(slave, &object, &pdo, &entry) != 0) {
+                if (object.role == DEV_DICT_ROLE_STATUS_WORD ||
+                    object.role == DEV_DICT_ROLE_MODE_DISPLAY ||
+                    object.role == DEV_DICT_ROLE_CONTROL_WORD ||
+                    object.role == DEV_DICT_ROLE_OP_MODE) {
+                    snprintf(g_bind_error, sizeof(g_bind_error),
+                             "从站 %u 轴 %d 缺少必需 PDO 对象 0x%04X:%02X",
+                             slave_pos, axis, object.index, object.sub);
+                    return -1;
+                }
+                continue;
             }
             if (bind_servo_role(list, slave_pos, slot + axis, &object,
-                                pdo, entry, axes == 6) != 0) return -1;
+                                pdo, entry, 0) != 0) return -1;
         }
     }
     return 0;

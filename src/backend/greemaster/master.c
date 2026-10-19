@@ -441,72 +441,33 @@ MASTER_API void Master_RequestStop(void) {
     atomic_store(&InterruptFlag, 1);   /* 让启动期的阻塞调用也能被停掉 */
 }
 
-/* write_sdo_index / read_sdo_index：**当前没有调用者**（SDO 通道在启动时已打开）。
- * 保留原因：驱动器 0x606C/0x60FF 的速度单位很可能要在这里读对象字典。
- * 真要启用须检查 GM_Sdo_Request_Send / GM_Sdo_Receive 的返回值。 */
-int write_sdo_index(int slave_pos, uint16_t index, uint8_t subindex, void* data, size_t data_size, int max_retry) {
-    int cnt = 0;
-    
-    SdoRequests sdo_request = {
-        .WR = 1,                  // 1 = 写操作
-        .SlavePos = slave_pos,            // 从站位置（0表示当前从站）
-        .Index = index,           // 索引号
-        .SubIndex = subindex,     // 子索引号
-        .Size = (uint16_t)data_size, // 传输大小（转换为uint16_t）
-        .data = (uint8_t*)data,   // 数据指针（转换为uint8_t*）
-        .status = 0,              // 初始状态
-        .Warn = 0,
-        .WarnPra1 = 0,
-        .WarnPra2 = 0
+int Master_SdoTransfer(int slave_pos, uint16_t index, uint8_t subindex,
+                       void* data, uint16_t size, int write, uint32_t timeout_ms) {
+    if (!g_ready || slave_pos < 0 || slave_pos >= slave_num || !data ||
+        (size != 1 && size != 2 && size != 4) || !timeout_ms) return -1;
+    if (stop_requested || exit_flag) return -4;
+    const uint64_t started = monotonic_ms();
+    if (started == UINT64_MAX) return -1;
+    uint8_t buffer[8] = {0};
+    if (write) memcpy(buffer, data, size);
+    SdoRequests req = {
+        .WR = write ? 1 : 0, .SlavePos = (uint16_t)slave_pos,
+        .Index = index, .SubIndex = subindex, .Size = size,
+        .data = buffer, .status = P_SDO_IDLE
     };
-
-    GM_Sdo_Request_Send(sdo_request);
-    while(sdo_request.status != P_SDO_SUCCESS){
-        if(cnt > max_retry){
-            return -1;
+    if (GM_Sdo_Request_Send(req) != 0) return -1;
+    for (;;) {
+        if (stop_requested || exit_flag) return -4;
+        const uint64_t now = monotonic_ms();
+        if (now == UINT64_MAX) return -1;
+        if (now - started >= timeout_ms) return -2;
+        /* SDK 接口按整秒等待；每次只等 1 秒，再检查总截止时间。 */
+        if (GM_Sdo_Receive(&req, 1) != 0) return -1;
+        if (req.status == P_SDO_SUCCESS) {
+            if (req.Size != size) return -3;
+            if (!write) memcpy(data, buffer, size);
+            return 0;
         }
-        GM_Sdo_Receive(&sdo_request, 5);
-        if(sdo_request.status == P_SDO_ERROR){
-            printf("sdo send error %d\n",sdo_request.status);
-            GM_Sdo_Request_Send(sdo_request);
-        }
-        printf("sdo send status is %d\n",sdo_request.status);
-        cnt++;
+        if (req.status == P_SDO_ERROR) return -3;
     }
-    return 0;
-}
-// 通用SDO读取函数（严格匹配结构体定义）
-int read_sdo_index(int slave_pos, uint16_t index, uint8_t subindex, void* data, size_t data_size, int max_retry) {
-    int cnt = 0;
-    
-    SdoRequests sdo_request = {
-        .WR = 0,                  // 0 = 读操作
-        .SlavePos = slave_pos,            // 从站位置（0表示当前从站）
-        .Index = index,           // 索引号
-        .SubIndex = subindex,     // 子索引号
-        .Size = (uint16_t)data_size, // 传输大小（转换为uint16_t）
-        .data = (uint8_t*)data,   // 数据指针（转换为uint8_t*）
-        .status = 0,              // 初始状态
-        .Warn = 0,
-        .WarnPra1 = 0,
-        .WarnPra2 = 0
-    };
-
-    GM_Sdo_Request_Send(sdo_request);
-    while(sdo_request.status != P_SDO_SUCCESS){
-        if(cnt > max_retry){
-            return -1;
-        }
-        GM_Sdo_Receive(&sdo_request, 5);
-        if(sdo_request.status == P_SDO_ERROR){
-            printf("sdo send error %d\n",sdo_request.status);
-            GM_Sdo_Request_Send(sdo_request);
-        }
-        printf("sdo send status is %d\n",sdo_request.status);
-        cnt++;
-    }
-    //printf("SDO warn is%d, %d, %d\n", sdo_request.Warn, sdo_request.WarnPra1, sdo_request.WarnPra2);
-    //SdoWar_Info_Get(NULL, &sdo_request);        // 检测是否存在警告信息
-    
-    return 0;
 }

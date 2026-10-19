@@ -7,9 +7,9 @@ extern "C" {
 
 /* 非周期面：生命周期、设备查询、映像尺寸、总线健康。
  * 与周期面（hal_rt_api.h）分工：那边单 RT 线程按三拍调用；这里启动前后与运行中都可调。
- * 线程：仅 hal_context_request_stop() 允许与周期调用并发（只写原子通知）；查询类读的是周期
- * 线程写的快照，并发须调用方同步；生命周期类进程内串行，stop/destroy 前调用方必须确认所有
- * 周期调用已退出（本模块不等待、不检测）。
+ * 线程：hal_context_request_stop() 可与周期调用并发；SDO 只允许非实时线程调用，
+ * 并且 stop/destroy 前须等待 SDO 返回。查询类快照并发须调用方同步；
+ * 生命周期类进程内串行，stop/destroy 前还须确认所有周期调用已退出。
  * 公共返回码（下面不再逐个重复）：
  *   HAL_ERROR_ARGUMENT    参数/轴号/从站号/function 非法
  *   HAL_ERROR_NOT_RUNNING 未 start，或信息需 start 认领设备后才有
@@ -59,6 +59,15 @@ int32_t hal_context_request_stop(HalContext* c);
  * @return 0 = 成功；HAL_ERROR_BUS = 关主站失败；HAL_ERROR_ARGUMENT = c 为空
  */
 int32_t hal_context_stop(HalContext* c);
+
+/* 非实时线程的 SDO 邮箱访问；须已 start，且调用方在 stop/destroy 前等待本调用结束。
+ * 同一时刻只受理一笔请求，PDO 周期线程不得调用。SDK 单次数据最多 4 字节。
+ * timeout_ms 是总等待时间；返回 BUSY/STOPPED/TIMEOUT/SDO/BUS/ARGUMENT。
+ * 读失败时 data 保持不变。 */
+int32_t hal_sdo_read(HalContext* c, int32_t slave_pos, uint16_t index,
+                     uint8_t subindex, void* data, uint32_t size, uint32_t timeout_ms);
+int32_t hal_sdo_write(HalContext* c, int32_t slave_pos, uint16_t index,
+                      uint8_t subindex, const void* data, uint32_t size, uint32_t timeout_ms);
 
 /**
  * @brief stop + free，一步收尾；c 可为 NULL

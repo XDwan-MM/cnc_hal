@@ -14,7 +14,7 @@
 
 #include <stdint.h>
 
-#define HAL_C_ABI_MAJOR  7u     /* 契约/语义版本：函数增删、返回码含义变 */
+#define HAL_C_ABI_MAJOR  8u     /* 契约/语义版本：函数增删、返回码含义变 */
 #define HAL_C_ABI_MINOR  3u     /* 结构布局版本：字段增删改序 */
 
 /* ---- HAL 发行版本 ---- */

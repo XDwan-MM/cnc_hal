@@ -100,6 +100,7 @@ struct HalContext {
 /* 当前占用主站的 context。主站是进程全局单例，生命周期操作由调用方串行；
  * 原子指针，request_stop 允许与周期调用并发读它。 */
 static _Atomic(HalContext*) owner;
+static atomic_flag sdo_active = ATOMIC_FLAG_INIT;
 
 /* 统一的「填错误文本 + 返回码」出口；非 RT 路径专用。 */
 static int report(int code, char* err, uint32_t len, const char* detail) {
@@ -466,6 +467,37 @@ int32_t hal_context_stop(HalContext* c) {
     if (atomic_load(&owner) == c) { rc = ethercat_close(); atomic_store(&owner, NULL); }
     reset_runtime(c);
     return rc ? HAL_ERROR_BUS : HAL_OK;
+}
+
+static int32_t sdo_transfer(HalContext* c, int32_t slave_pos, uint16_t index,
+                            uint8_t subindex, void* data, uint32_t size,
+                            uint32_t timeout_ms, int write) {
+    if (!c || !data || slave_pos < 0 || (size != 1 && size != 2 && size != 4) ||
+        !timeout_ms) return HAL_ERROR_ARGUMENT;
+    if (!c->running) return HAL_ERROR_NOT_RUNNING;
+    if (slave_pos >= c->slave_count) return HAL_ERROR_ARGUMENT;
+    if (atomic_load(&c->stop_requested)) return HAL_ERROR_STOPPED;
+    if (atomic_flag_test_and_set(&sdo_active)) return HAL_ERROR_BUSY;
+    uint8_t value[4] = {0};
+    if (write) memcpy(value, data, size);
+    const int rc = Master_SdoTransfer(slave_pos, index, subindex, value,
+                                      (uint16_t)size, write, timeout_ms);
+    if (!rc && !write) memcpy(data, value, size);
+    atomic_flag_clear(&sdo_active);
+    if (rc == -2) return HAL_ERROR_TIMEOUT;
+    if (rc == -3) return HAL_ERROR_SDO;
+    if (rc == -4) return HAL_ERROR_STOPPED;
+    return rc ? HAL_ERROR_BUS : HAL_OK;
+}
+
+int32_t hal_sdo_read(HalContext* c, int32_t slave_pos, uint16_t index,
+                     uint8_t subindex, void* data, uint32_t size, uint32_t timeout_ms) {
+    return sdo_transfer(c, slave_pos, index, subindex, data, size, timeout_ms, 0);
+}
+
+int32_t hal_sdo_write(HalContext* c, int32_t slave_pos, uint16_t index,
+                      uint8_t subindex, const void* data, uint32_t size, uint32_t timeout_ms) {
+    return sdo_transfer(c, slave_pos, index, subindex, (void*)data, size, timeout_ms, 1);
 }
 
 /* stop + free。参数可空。 */

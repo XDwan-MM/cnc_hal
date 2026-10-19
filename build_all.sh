@@ -2,7 +2,7 @@
 set -euo pipefail
 
 project_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-build_dir="${project_root}/build/all"
+build_dir="${HAL_BUILD_DIR:-${project_root}/build/all}"
 
 cmake -S "${project_root}" -B "${build_dir}" \
     -DHAL_BUILD_STATIC=ON \

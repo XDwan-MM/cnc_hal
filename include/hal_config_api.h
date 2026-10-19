@@ -16,6 +16,7 @@
 #define HAL_ERROR_UNSUPPORTED 0x0105  /* 设备不支持该功能：PDO 没绑或位长不合规、定向没配。不静默当成功 */
 #define HAL_ERROR_NOT_ENABLED   0x0106  /* 轴尚未使能，或状态机还没到位。写指令被拒，等使能/等状态机 */
 #define HAL_ERROR_MODE_MISMATCH 0x0107  /* 运行模式未到位：实际或期望模式不是该指令要求的 CSP（写位置）或 CSV（写转速） */
+#define HAL_ERROR_SDO         0x0108  /* SDO 应答失败或数据长度不符 */
 #define HAL_READY_PHASE        0x01u  /* 不在 begin 与 commit 之间（调用时机错） */
 #define HAL_READY_NOT_ENABLED  0x02u  /* 尚未到 OperationEnabled */
 #define HAL_READY_NOT_READY    0x04u  /* 状态机或采样未到位 */

@@ -16,7 +16,7 @@ int main(int argc, char** argv) {
     CHECK(argc > 1);
     for (int i = 2; i < argc; ++i) {
         CHECK(DevDict_Load(argv[1], error, sizeof(error)) == 0);
-        CHECK(DevDict_EntryCount() == 11);
+        CHECK(DevDict_EntryCount() == 12);
         const int expected_ok = argv[i][0] == '+';
         const int rc = DevDict_Load(argv[i]+1, error, sizeof(error));
         if ((rc == 0) != expected_ok) {

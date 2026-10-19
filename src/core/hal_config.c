@@ -109,7 +109,8 @@ void hal_error_text(int32_t code, char* out, uint32_t len) {
     case HAL_ERROR_BUSY: text = "主站已被占用"; break;
     case HAL_ERROR_STATE: text = "调用顺序错误"; break;
     case HAL_ERROR_MEMORY: text = "内存分配失败"; break;
-    case HAL_ERROR_TIMEOUT: text = "启动总预算已耗尽"; break;
+    case HAL_ERROR_TIMEOUT: text = "操作超时"; break;
+    case HAL_ERROR_SDO: text = "SDO 应答失败"; break;
     case HAL_ERROR_UNSUPPORTED: text = "设备不支持该功能"; break;
     case HAL_ERROR_NOT_ENABLED: text = "轴尚未使能"; break;
     case HAL_ERROR_MODE_MISMATCH: text = "运行模式未到位"; break;
